@@ -3,12 +3,14 @@ import sys
 import os
 import base64
 import hmac
+import hashlib
 import threading
 import uuid
 import time
 import re
 import shutil
 import ipaddress
+import traceback
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -293,6 +295,7 @@ ACCESS_AUTH_PASSWORD = str(os.getenv("ACCESS_PASSWORD", "Recon103!") or "Recon10
 ACCESS_AUTH_ENABLED = str(os.getenv("ACCESS_AUTH_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
 ACCESS_AUTH_REALM = str(os.getenv("ACCESS_AUTH_REALM", "AI Recon Agent") or "AI Recon Agent")
 ACCESS_AUTH_EXEMPT_PATHS = {"/api/health"}
+LLM_DEBUG_ERRORS = str(os.getenv("LLM_DEBUG_ERRORS", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
 
 DEFENSIVE_QUERY_HINTS = (
     "prevent", "mitigate", "defend", "fix", "patch", "harden", "secure",
@@ -566,21 +569,171 @@ def _build_policy_block_report(query: str, safety: dict, mode: str = "auto") -> 
 def _friendly_runtime_error_message(exc: Exception) -> str:
     raw = str(exc or "")
     low = raw.lower()
+    debug_tail = ""
+    if LLM_DEBUG_ERRORS and _is_likely_llm_provider_error(exc):
+        debug_tail = f" Debug: {_format_llm_exception_debug(exc)}"
     if "401" in low and "user not found" in low:
         return (
             "LLM provider authentication failed (401: User not found). "
             "Set a valid `OPENROUTER_API_KEY` in Railway environment variables and redeploy. "
             "This app is configured for OpenRouter (`https://openrouter.ai/api/v1`), so an OpenAI key will not work."
+            + debug_tail
         )
     if "openrouter_api_key not set" in low:
         return (
             "Missing required environment variable `OPENROUTER_API_KEY`. "
             "Set it in Railway variables and redeploy."
+            + debug_tail
         )
     return (
         "Uncaught worker exception; forcing session shutdown. "
         f"Details: {raw}"
+        + debug_tail
     )
+
+
+def _is_likely_llm_provider_error(exc: Exception) -> bool:
+    if exc is None:
+        return False
+    module_name = str(getattr(exc.__class__, "__module__", "") or "").lower()
+    if module_name.startswith("openai"):
+        return True
+    text = str(exc or "").lower()
+    markers = (
+        "openrouter", "error code:", "user not found", "invalid api key",
+        "authentication", "rate limit", "model not found",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _safe_api_key_fingerprint(raw_key: str) -> str:
+    value = str(raw_key or "").strip()
+    if not value:
+        return "missing"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _api_key_format(raw_key: str) -> str:
+    value = str(raw_key or "").strip()
+    if not value:
+        return "missing"
+    if value.startswith("sk-or-v1-"):
+        return "openrouter"
+    if value.startswith("sk-"):
+        return "openai_or_other"
+    return "unknown"
+
+
+def _extract_status_code(exc: Exception) -> str:
+    try:
+        status = getattr(exc, "status_code", None)
+        if status is not None and str(status).strip():
+            return str(status).strip()
+    except Exception:
+        pass
+    raw = str(exc or "")
+    m = re.search(r"\b([1-5][0-9]{2})\b", raw)
+    return m.group(1) if m else "unknown"
+
+
+def _extract_request_id(exc: Exception) -> str:
+    for attr in ("request_id", "_request_id"):
+        try:
+            val = getattr(exc, attr, None)
+            if val:
+                return str(val).strip()
+        except Exception:
+            pass
+    try:
+        response = getattr(exc, "response", None)
+        if response is not None:
+            headers = getattr(response, "headers", {}) or {}
+            for key in ("x-request-id", "request-id", "x-openai-request-id"):
+                v = headers.get(key) or headers.get(key.upper()) or headers.get(key.title())
+                if v:
+                    return str(v).strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _extract_provider_error_message(exc: Exception) -> str:
+    try:
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            err = body.get("error")
+            if isinstance(err, dict):
+                msg = err.get("message") or err.get("type") or ""
+                if msg:
+                    return str(msg).strip()
+            if isinstance(body.get("message"), str) and body.get("message", "").strip():
+                return str(body.get("message")).strip()
+    except Exception:
+        pass
+
+    raw = str(exc or "")
+    m_single = re.search(r"'message'\s*:\s*'([^']+)'", raw)
+    if m_single:
+        return m_single.group(1).strip()
+    m_double = re.search(r'"message"\s*:\s*"([^"]+)"', raw)
+    if m_double:
+        return m_double.group(1).strip()
+    return raw[:220]
+
+
+def _llm_debug_hint(status_code: str, key_format: str, provider_message: str) -> str:
+    status = str(status_code or "").strip()
+    message = str(provider_message or "").lower()
+    if status == "401":
+        if key_format == "openai_or_other":
+            return "OPENROUTER_API_KEY appears to be an OpenAI-style key; OpenRouter expects `sk-or-v1-...`."
+        if "user not found" in message:
+            return "OPENROUTER_API_KEY is invalid/revoked or tied to a different provider/account."
+        return "Authentication failed; verify OPENROUTER_API_KEY in Railway variables and redeploy."
+    if status == "404":
+        return "Model or endpoint may be unavailable for this key/account; verify OPENROUTER_MODEL and provider routing."
+    if status == "429":
+        return "Rate/credit limit hit; check OpenRouter billing/limits and retry."
+    return "Inspect status code and provider message above; this is a provider-side LLM call failure."
+
+
+def _format_llm_exception_debug(exc: Exception) -> str:
+    key = str(os.getenv("OPENROUTER_API_KEY", "") or "")
+    status_code = _extract_status_code(exc)
+    provider_message = _extract_provider_error_message(exc)
+    key_format = _api_key_format(key)
+    hint = _llm_debug_hint(status_code, key_format, provider_message)
+    model = str(os.getenv("OPENROUTER_MODEL", get_model()) or get_model())
+    return (
+        f"type={exc.__class__.__name__}; "
+        f"status_code={status_code}; "
+        f"provider_message={_clip_text(provider_message, 180)}; "
+        f"model={model}; "
+        f"base_url=https://openrouter.ai/api/v1; "
+        f"key_present={'yes' if bool(key) else 'no'}; "
+        f"key_format={key_format}; "
+        f"key_fp={_safe_api_key_fingerprint(key)}; "
+        f"request_id={_extract_request_id(exc)}; "
+        f"hint={hint}"
+    )
+
+
+def _log_worker_exception(session_id: str, phase: str, exc: Exception) -> None:
+    try:
+        print(
+            f"[worker:{session_id}] phase={phase} exception={exc.__class__.__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if LLM_DEBUG_ERRORS:
+            print(
+                f"[worker:{session_id}] llm_debug={_format_llm_exception_debug(exc)}",
+                file=sys.stderr,
+                flush=True,
+            )
+        traceback.print_exc()
+    except Exception:
+        pass
 
 
 def _normalize_web_target(target: str) -> str:
@@ -2381,7 +2534,8 @@ def run_agent_worker(
                         )
                     })
                 else:
-                    emit("error", {"message": f"Worker exception in model loop: {str(e)}"})
+                    emit("error", {"message": _friendly_runtime_error_message(e)})
+                _log_worker_exception(session_id, "model_loop", e)
                 break
             if stopped:
                 break
@@ -2778,6 +2932,7 @@ def run_agent_worker(
         emit("error", {
             "message": _friendly_runtime_error_message(fatal_exc)
         })
+        _log_worker_exception(session_id, "fatal", fatal_exc)
     finally:
         with sessions_lock:
             s = sessions.get(session_id)

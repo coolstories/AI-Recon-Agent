@@ -30,6 +30,7 @@ cp .env.example .env
 # Optional: add WPSCAN_API_TOKEN for WPScan vulnerability intelligence
 # Optional: set TRUTH_VERIFICATION_POLICY (strict|balanced|aggressive) for deep-scan verification gating
 # Optional: set ACCESS_PASSWORD (HTTP Basic Auth password for UI/API)
+# Optional: set LLM_DEBUG_ERRORS=1 to include sanitized provider/model/key diagnostics in worker errors
 
 # 4. Run
 python main.py
@@ -95,6 +96,7 @@ This includes raw output, JSON reports, logs, and visual assets when generated.
   - `ACCESS_PASSWORD` (set to your desired password, e.g. `Recon103!`)
 - Optional variables:
   - `TRUTH_VERIFICATION_POLICY`
+  - `LLM_DEBUG_ERRORS` (default `1`; set `0` to hide detailed LLM diagnostics)
   - `SHODAN_API_KEY`, `WPSCAN_API_TOKEN`, etc.
 
 HTTP Basic Auth is enabled by default when `ACCESS_PASSWORD` is set.
