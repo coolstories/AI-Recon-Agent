@@ -375,6 +375,83 @@ def _default_runtime_state() -> dict:
     }
 
 
+def _sanitize_tool_call_message_sequence(messages: list[dict]) -> tuple[list[dict], int]:
+    """Drop incomplete assistant tool-call batches and orphan tool messages.
+
+    Some providers reject message histories where an assistant tool call does not
+    have matching tool outputs. This can happen if a worker crashes mid-batch and
+    recovery resumes from a partial checkpoint.
+    """
+    if not isinstance(messages, list):
+        return [], 0
+
+    sanitized: list[dict] = []
+    dropped_batches = 0
+    idx = 0
+
+    while idx < len(messages):
+        raw = messages[idx]
+        if not isinstance(raw, dict):
+            idx += 1
+            continue
+
+        role = str(raw.get("role", "") or "")
+        if role == "assistant" and isinstance(raw.get("tool_calls"), list) and raw.get("tool_calls"):
+            tool_calls = raw.get("tool_calls") or []
+            call_ids = []
+            call_id_set = set()
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                tc_id = str(tc.get("id", "") or "").strip()
+                if not tc_id or tc_id in call_id_set:
+                    continue
+                call_id_set.add(tc_id)
+                call_ids.append(tc_id)
+
+            # Malformed tool-call payload; skip this batch.
+            if not call_ids:
+                dropped_batches += 1
+                idx += 1
+                continue
+
+            tool_msgs: list[dict] = []
+            responded_ids = set()
+            lookahead = idx + 1
+            while lookahead < len(messages):
+                tool_raw = messages[lookahead]
+                if not isinstance(tool_raw, dict):
+                    break
+                if str(tool_raw.get("role", "") or "") != "tool":
+                    break
+                tool_call_id = str(tool_raw.get("tool_call_id", "") or "").strip()
+                if tool_call_id not in call_id_set:
+                    break
+                tool_msgs.append(tool_raw)
+                responded_ids.add(tool_call_id)
+                lookahead += 1
+
+            if responded_ids == call_id_set:
+                sanitized.append(raw)
+                sanitized.extend(tool_msgs)
+            else:
+                dropped_batches += 1
+
+            idx = lookahead
+            continue
+
+        if role == "tool":
+            # Orphan tool message with no preceding assistant tool-call message.
+            dropped_batches += 1
+            idx += 1
+            continue
+
+        sanitized.append(raw)
+        idx += 1
+
+    return sanitized, dropped_batches
+
+
 def _normalize_auth_context(raw) -> dict:
     ctx = raw if isinstance(raw, dict) else {}
     enabled = bool(ctx.get("enabled", False))
@@ -2152,6 +2229,8 @@ def run_agent_worker(
     stopped = False
     next_iteration_idx = 0
     last_checkpoint_ts = 0.0
+    recovery_sanitized_batches = 0
+    recovered_from_checkpoint = False
     primary_target = _extract_primary_target(user_input)
     primary_host = _normalize_web_target(primary_target or user_input)
     root_domain = _registrable_domain(primary_host)
@@ -2181,15 +2260,19 @@ def run_agent_worker(
     if recovering:
         checkpoint_messages = runtime_snapshot.get("messages") or []
         if isinstance(checkpoint_messages, list) and checkpoint_messages:
-            messages = checkpoint_messages
-            start_iteration = int(runtime_snapshot.get("iteration", 0) or 0)
-            extra_verification_used = bool(runtime_snapshot.get("extra_verification_used", False))
-            auto_wpscan_hosts = set(runtime_snapshot.get("auto_wpscan_hosts", []) or [])
-            known_hosts = set(runtime_snapshot.get("known_hosts", []) or [])
-            severe_path_executed = bool(runtime_snapshot.get("severe_path_executed", False))
-            netlas_disabled = bool(runtime_snapshot.get("netlas_disabled", runtime_snapshot.get("shodan_disabled", False)))
-            passive_recon_degraded = str(runtime_snapshot.get("passive_recon_degraded", "") or "")
-        else:
+            sanitized_checkpoint_messages, dropped_batches = _sanitize_tool_call_message_sequence(checkpoint_messages)
+            recovery_sanitized_batches = int(dropped_batches)
+            if sanitized_checkpoint_messages:
+                messages = sanitized_checkpoint_messages
+                recovered_from_checkpoint = True
+                start_iteration = int(runtime_snapshot.get("iteration", 0) or 0)
+                extra_verification_used = bool(runtime_snapshot.get("extra_verification_used", False))
+                auto_wpscan_hosts = set(runtime_snapshot.get("auto_wpscan_hosts", []) or [])
+                known_hosts = set(runtime_snapshot.get("known_hosts", []) or [])
+                severe_path_executed = bool(runtime_snapshot.get("severe_path_executed", False))
+                netlas_disabled = bool(runtime_snapshot.get("netlas_disabled", runtime_snapshot.get("shodan_disabled", False)))
+                passive_recon_degraded = str(runtime_snapshot.get("passive_recon_degraded", "") or "")
+        if not recovered_from_checkpoint:
             resume_context = _build_followup_context(session_snapshot or {
                 "id": session_id,
                 "query": user_input,
@@ -2235,7 +2318,8 @@ def run_agent_worker(
             if int(s.get("worker_token", 0) or 0) != int(worker_token):
                 return
             runtime = dict(s.get("runtime", _default_runtime_state()) or _default_runtime_state())
-            runtime["messages"] = list(messages)
+            sanitized_messages, _ = _sanitize_tool_call_message_sequence(list(messages))
+            runtime["messages"] = sanitized_messages
             runtime["iteration"] = int(next_iteration_idx)
             runtime["extra_verification_used"] = bool(extra_verification_used)
             runtime["auto_wpscan_hosts"] = sorted(list(auto_wpscan_hosts))
@@ -2463,6 +2547,13 @@ def run_agent_worker(
                 "state": "recovering",
                 "attempt": int(runtime_snapshot.get("recovery_attempts", 0) or 0),
             })
+            if recovery_sanitized_batches > 0:
+                emit("tool_info", {
+                    "message": (
+                        "Recovery sanitized incomplete tool-call context "
+                        f"({recovery_sanitized_batches} batch(es)) before resuming."
+                    )
+                })
 
         safety = _classify_query_safety(user_input)
         if safety.get("blocked"):
@@ -2504,6 +2595,16 @@ def run_agent_worker(
 
             final_message = None
             try:
+                sanitized_messages, dropped_batches = _sanitize_tool_call_message_sequence(messages)
+                if dropped_batches > 0:
+                    messages = sanitized_messages
+                    emit("tool_info", {
+                        "message": (
+                            "Sanitized incomplete tool-call context before model step "
+                            f"(dropped {dropped_batches} batch(es))."
+                        )
+                    })
+                    checkpoint_runtime(force=True)
                 for event in chat_completion_stream(messages, tools=ALL_TOOLS):
                     if _is_stop_requested(session_id, worker_token):
                         stopped = True

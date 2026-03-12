@@ -42,6 +42,45 @@ class ServerCoverageSignalTests(unittest.TestCase):
         self.assertIn("hint=", msg)
         self.assertNotIn("sk-test-debug-key-123", msg)
 
+    def test_sanitize_tool_call_messages_keeps_complete_batches(self):
+        msgs = [
+            {"role": "system", "content": "s"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "dns_recon", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+            {"role": "assistant", "content": "done"},
+        ]
+        sanitized, dropped = server._sanitize_tool_call_message_sequence(msgs)
+        self.assertEqual(dropped, 0)
+        self.assertEqual(sanitized, msgs)
+
+    def test_sanitize_tool_call_messages_drops_incomplete_or_orphan_tool_messages(self):
+        msgs = [
+            {"role": "system", "content": "s"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "dns_recon", "arguments": "{}"}},
+                    {"id": "call_2", "type": "function", "function": {"name": "port_scan", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "partial"},
+            {"role": "assistant", "content": "next"},
+            {"role": "tool", "tool_call_id": "orphan", "content": "bad"},
+        ]
+        sanitized, dropped = server._sanitize_tool_call_message_sequence(msgs)
+        self.assertEqual(dropped, 2)
+        self.assertEqual(sanitized, [
+            {"role": "system", "content": "s"},
+            {"role": "assistant", "content": "next"},
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()
