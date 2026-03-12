@@ -331,7 +331,28 @@ fi
 
 # Secret/code scanners
 ensure_or_install "trufflehog" "TruffleHog" try_brew_install "trufflehog"
+if ! has_cmd trufflehog; then
+  try_go_install "github.com/trufflesecurity/trufflehog/v3@latest" || true
+fi
+if has_cmd trufflehog; then
+  ok "TruffleHog installed ($(command -v trufflehog))"
+else
+  warn "TruffleHog still missing"
+fi
+
 ensure_or_install "gitleaks" "GitLeaks" try_brew_install "gitleaks"
+if ! has_cmd gitleaks; then
+  try_go_install "github.com/gitleaks/gitleaks/v8@latest" || true
+fi
+if ! has_cmd gitleaks; then
+  try_github_binary_install "gitleaks/gitleaks" "gitleaks" "$(platform_asset_regex '(\\.tar\\.gz|\\.tgz|\\.zip)$')" || true
+fi
+if has_cmd gitleaks; then
+  ok "GitLeaks installed ($(command -v gitleaks))"
+else
+  warn "GitLeaks still missing"
+fi
+
 ensure_or_install "semgrep" "Semgrep" try_pip_install "semgrep"
 
 # Recon/fuzzing tools
@@ -398,9 +419,14 @@ fi
 if has_cmd aquatone; then
   ok "Aquatone already installed"
 else
-  warn "Aquatone not found; no reliable package manager formula detected"
-  info "Install Aquatone manually from release binaries:"
-  info "https://github.com/michenriksen/aquatone/releases"
+  warn "Aquatone not found"
+  try_github_binary_install "michenriksen/aquatone" "aquatone" "$(platform_asset_regex '(\\.zip|\\.tar\\.gz|\\.tgz)$')" || true
+  if has_cmd aquatone; then
+    ok "Aquatone installed ($(command -v aquatone))"
+  else
+    warn "Aquatone still missing; manual install from:"
+    info "https://github.com/michenriksen/aquatone/releases"
+  fi
 fi
 
 info "Bootstrap complete. Verify with:"

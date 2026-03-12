@@ -1,0 +1,16 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.DS_Store
+.env
+.env.local
+.env.*.local
+.venv/
+venv/
+data/artifacts/
+data/chats/
+

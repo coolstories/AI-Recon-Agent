@@ -108,6 +108,26 @@ If logs show `401 User not found`, the `OPENROUTER_API_KEY` configured in Railwa
 
 Important: put the command above in **Start Command**, not **Build Command**.
 
+## Railway Docker Deploy (Recommended for External Scanners)
+
+If you want tools like WPScan/ffuf/nuclei to be available in Railway, use Docker deploy.
+
+1. Commit and push this repo (includes `Dockerfile`).
+2. In Railway, create a new service from this GitHub repo.
+3. Railway should detect the `Dockerfile` automatically.
+4. Leave Build Command and Start Command empty (Docker handles both).
+5. Set these Railway Variables:
+   - `OPENROUTER_API_KEY` (required)
+   - `OPENROUTER_MODEL` (for example `openai/gpt-5.4`)
+   - `ACCESS_PASSWORD` (recommended)
+   - Optional: `SHODAN_API_KEY`, `WPSCAN_API_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+6. Deploy.
+
+Notes:
+- First Docker build is slower because external scanners are installed in the image.
+- `PORT` is handled automatically by Railway and used by the container start command.
+- Do not commit `.env`; Railway Variables should store secrets.
+
 ## Disclaimer
 
 **Only scan websites you own or have explicit permission to test.** Unauthorized scanning is illegal in most jurisdictions.
