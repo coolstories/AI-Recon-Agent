@@ -12,6 +12,9 @@ for _bin_dir in (os.path.expanduser("~/.local/bin"), "/opt/homebrew/bin", "/usr/
 from dotenv import load_dotenv
 load_dotenv()
 
+# ASGI entrypoint for platforms that default to `main:app` (e.g., Railway).
+from server import app
+
 from agent.core import Agent
 from agent.llm import get_model
 from utils.display import (
