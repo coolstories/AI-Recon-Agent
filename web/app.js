@@ -11,6 +11,7 @@ let streamRecoveryState = {}; // id -> { attempts, timerId, lastErrorAt }
 const STALL_CHECK_THRESHOLD_SEC = 200;
 const STALL_CHECK_COOLDOWN_SEC = 200;
 const STALL_STATUS_CHECK_TIMEOUT_MS = 65000;
+const ACTIVE_CHAT_STORAGE_KEY = 'ai_model_active_chat_id';
 
 const ASK_FOLLOWUP_PROMPTS = {
     explain: 'Explain your previous answer in plain language for a non-technical person.',
@@ -19,6 +20,24 @@ const ASK_FOLLOWUP_PROMPTS = {
 };
 
 const $ = id => document.getElementById(id);
+
+function getStoredActiveChatId() {
+    try {
+        return localStorage.getItem(ACTIVE_CHAT_STORAGE_KEY) || '';
+    } catch (err) {
+        return '';
+    }
+}
+
+function setStoredActiveChatId(chatId) {
+    try {
+        if (chatId) {
+            localStorage.setItem(ACTIVE_CHAT_STORAGE_KEY, chatId);
+        } else {
+            localStorage.removeItem(ACTIVE_CHAT_STORAGE_KEY);
+        }
+    } catch (err) {}
+}
 
 function isAbortLikeError(err) {
     const name = String(err?.name || '').toLowerCase();
@@ -577,10 +596,12 @@ function streamChat(chatId) {
 }
 
 async function selectChat(chatId) {
+    if (!chatId) return;
     if (askModalState.open && askModalState.chatId !== chatId) {
         closeAskModal();
     }
     activeChatId = chatId;
+    setStoredActiveChatId(chatId);
     renderChatList();
 
     // Show chat view
@@ -620,6 +641,7 @@ async function deleteChat(chatId, e) {
     delete streamRecoveryState[chatId];
     if (activeChatId === chatId) {
         activeChatId = null;
+        setStoredActiveChatId('');
         closeAskModal();
         $('emptyState').classList.remove('hidden');
         $('chatView').classList.add('hidden');
@@ -1740,9 +1762,22 @@ async function init() {
     }
     renderChatList();
 
-    // Auto-select the most recent chat if any
-    if (serverChats.length > 0) {
-        selectChat(serverChats[0].id);
+    // Restore last active chat after reload, else prefer a running chat.
+    const storedActiveId = getStoredActiveChatId();
+    let nextActiveId = '';
+    if (storedActiveId && chats[storedActiveId]) {
+        nextActiveId = storedActiveId;
+    }
+    if (!nextActiveId) {
+        const running = serverChats.find(c => c.status === 'running');
+        if (running?.id) nextActiveId = running.id;
+    }
+    if (!nextActiveId && serverChats.length > 0) {
+        nextActiveId = serverChats[0].id;
+    }
+
+    if (nextActiveId) {
+        selectChat(nextActiveId);
     } else {
         renderActiveChatActivity();
         updateStopChatButton();
@@ -1792,6 +1827,7 @@ $('askModalForm').addEventListener('submit', (e) => {
 // New chat button in sidebar
 $('newChatBtn').addEventListener('click', () => {
     activeChatId = null;
+    setStoredActiveChatId('');
     closeAskModal();
     $('emptyState').classList.remove('hidden');
     $('chatView').classList.add('hidden');
@@ -1819,6 +1855,28 @@ document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
         e.preventDefault();
         $('newChatBtn').click();
+    }
+});
+
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    for (const [chatId, chat] of Object.entries(chats)) {
+        if (!chat || chat.status !== 'running') continue;
+        const src = chat._evtSource;
+        if (!src || src.readyState === EventSource.CLOSED) {
+            streamChat(chatId);
+        }
+    }
+});
+
+window.addEventListener('beforeunload', () => {
+    // Closing SSE connections must not stop the backend worker.
+    for (const chat of Object.values(chats)) {
+        if (chat?._evtSource) {
+            try {
+                chat._evtSource.close();
+            } catch (err) {}
+        }
     }
 });
 

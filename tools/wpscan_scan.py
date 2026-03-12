@@ -220,6 +220,42 @@ def _tail_text(text: str, max_lines: int = 8, max_chars: int = 700):
     return tail
 
 
+def _classify_exec_failure(result: dict):
+    timed_out = bool(result.get("timed_out"))
+    stdout_text = str(result.get("stdout", "") or "")
+    stderr_text = str(result.get("stderr", "") or "")
+    blob = f"{stdout_text}\n{stderr_text}".lower()
+
+    if timed_out:
+        return {
+            "code": "EXEC_TIMEOUT",
+            "status_message": "WPScan timed out before producing structured report output; fallback executed.",
+            "summary_prefix": "COVERAGE DOWNGRADE: WPScan timed out before JSON report; fallback WordPress assessment executed.",
+            "hint": "Hint: raise timeout for this host or reduce WPScan enumeration depth if runtime is constrained.",
+        }
+
+    ruby_runtime_markers = (
+        "gem::missingspecversionerror",
+        "could not find 'bundler'",
+        "gemfile.lock",
+        "uninitialized constant gem::resolver::apiset::gemparser",
+    )
+    if any(marker in blob for marker in ruby_runtime_markers):
+        return {
+            "code": "RUBY_RUNTIME",
+            "status_message": "WPScan runtime dependency error detected; fallback executed.",
+            "summary_prefix": "COVERAGE DOWNGRADE: WPScan runtime dependency failure; fallback WordPress assessment executed.",
+            "hint": "Hint: fix WPScan runtime deps (Ruby/Bundler) in this environment, then rerun.",
+        }
+
+    return {
+        "code": "EXEC_FAILURE",
+        "status_message": "WPScan execution failed before producing structured report output; fallback executed.",
+        "summary_prefix": "COVERAGE DOWNGRADE: WPScan execution failed; fallback WordPress assessment executed.",
+        "hint": "",
+    }
+
+
 def run_wpscan(
     target: str,
     scan_profile: str = "aggressive_enum",
@@ -259,6 +295,7 @@ def run_wpscan(
     env_patch = {}
     if token:
         env_patch["WPSCAN_API_TOKEN"] = token
+    enumerate_flags = str(os.getenv("WPSCAN_ENUM_FLAGS", "vp,vt,tt,cb,dbe,u") or "").strip() or "vp,vt,tt,cb,dbe,u"
 
     artifact_dir = create_artifact_dir("wpscan", artifact_session)
     report_file = artifact_dir / "report.json"
@@ -276,7 +313,7 @@ def run_wpscan(
         str(report_file),
         "--random-user-agent",
         "--enumerate",
-        "vp,vt,tt,cb,dbe,u,m",
+        enumerate_flags,
         "--plugins-detection",
         "aggressive",
     ]
@@ -304,6 +341,7 @@ def run_wpscan(
         "target": normalized,
         "host": _host_label(normalized),
         "scan_profile": profile,
+        "enumerate": enumerate_flags,
         "token_mode": token_mode,
     }, indent=2))
 
@@ -311,17 +349,28 @@ def run_wpscan(
     non_wp = _looks_like_non_wordpress(result["stdout"], result["stderr"])
 
     if int(result.get("exit_code", 0) or 0) != 0 and not summary.get("loaded", False):
+        failure = _classify_exec_failure(result)
         emit(stream_callback, "coverage_degraded", {
             "tool": "run_wpscan",
-            "code": "EXEC_FAILURE",
-            "message": "WPScan execution failed before producing structured report output.",
+            "code": failure["code"],
+            "message": failure["status_message"],
             "fallback": "cms_scan + check_exposed_paths",
         })
         fallback = _wpscan_fallback_assessment(normalized, stream_callback=stream_callback)
         err_tail = _tail_text(result.get("stderr", ""))
-        extra = f"\nWPScan stderr tail:\n{err_tail}" if err_tail else ""
+        out_tail = _tail_text(result.get("stdout", ""))
+        details = []
+        if err_tail:
+            details.append(f"WPScan stderr tail:\n{err_tail}")
+        if out_tail:
+            details.append(f"WPScan stdout tail:\n{out_tail}")
+        hint = str(failure.get("hint") or "").strip()
+        if hint:
+            details.append(hint)
+        detail_text = "\n\n".join(details)
+        extra = f"\n{detail_text}" if detail_text else ""
         return (
-            "COVERAGE DOWNGRADE: WPScan execution failed; fallback WordPress assessment executed.\n"
+            f"{failure['summary_prefix']}\n"
             f"WPScan exit_code={result.get('exit_code')}, elapsed={result.get('elapsed')}s.{extra}\n\n"
             f"{fallback}"
         )

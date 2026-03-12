@@ -124,6 +124,46 @@ class WrapperBinaryResolutionTests(unittest.TestCase):
         self.assertIn("COVERAGE DOWNGRADE", out)
         self.assertIn("WPSCAN_EXEC_FALLBACK_OK", out)
 
+    def test_wpscan_timeout_without_report_uses_timeout_wording(self):
+        fake_result = {
+            "stdout": "",
+            "stderr": "",
+            "exit_code": -9,
+            "timed_out": True,
+            "elapsed": 420.0,
+            "command": "wpscan ...",
+        }
+        with patch(
+            "tools.wpscan_scan.find_binary_or_auto_install",
+            return_value=("wpscan", "/tmp/wpscan", ""),
+        ), patch("tools.wpscan_scan.run_command", return_value=fake_result), patch(
+            "tools.wpscan_scan._wpscan_fallback_assessment",
+            return_value="WPSCAN_TIMEOUT_FALLBACK_OK",
+        ):
+            out = wpscan_scan.run_wpscan("https://example.com", timeout=420)
+        self.assertIn("timed out before json report", out.lower())
+        self.assertIn("WPSCAN_TIMEOUT_FALLBACK_OK", out)
+
+    def test_wpscan_runtime_dependency_failure_wording(self):
+        fake_result = {
+            "stdout": "",
+            "stderr": "Could not find 'bundler' (4.0.8) required by your Gemfile.lock",
+            "exit_code": 1,
+            "timed_out": False,
+            "elapsed": 0.6,
+            "command": "wpscan ...",
+        }
+        with patch(
+            "tools.wpscan_scan.find_binary_or_auto_install",
+            return_value=("wpscan", "/tmp/wpscan", ""),
+        ), patch("tools.wpscan_scan.run_command", return_value=fake_result), patch(
+            "tools.wpscan_scan._wpscan_fallback_assessment",
+            return_value="WPSCAN_RUNTIME_FALLBACK_OK",
+        ):
+            out = wpscan_scan.run_wpscan("https://example.com", timeout=20)
+        self.assertIn("runtime dependency", out.lower())
+        self.assertIn("WPSCAN_RUNTIME_FALLBACK_OK", out)
+
 
 class FfufFallbackAndIsolationTests(unittest.TestCase):
     def test_ffuf_fallback_chain_reaches_internal_probe(self):
