@@ -90,6 +90,33 @@ TAKEOVER_FINGERPRINTS = {
 }
 
 
+def _iter_with_thread_fallback(items, worker_fn, max_workers, emit=None, warning=None):
+    """Run worker_fn concurrently when possible; fallback to sequential on thread exhaustion."""
+    seq_items = list(items)
+    if not seq_items:
+        return
+
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as executor:
+            futures = {executor.submit(worker_fn, item): item for item in seq_items}
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    yield item, future.result(), None
+                except Exception as exc:
+                    yield item, None, exc
+    except RuntimeError as exc:
+        if "can't start new thread" not in str(exc).lower():
+            raise
+        if emit:
+            emit(warning or "  ⚠️ Thread limit reached; switching to sequential mode.")
+        for item in seq_items:
+            try:
+                yield item, worker_fn(item), None
+            except Exception as item_exc:
+                yield item, None, item_exc
+
+
 def _resolve(subdomain, record_type="A"):
     """Resolve DNS record."""
     try:
@@ -200,18 +227,22 @@ def subdomain_enumerate(target, mode="passive", stream_callback=None):
                 return sub, ips
             return None, None
 
-        with ThreadPoolExecutor(max_workers=50) as executor:
-            futures = {executor.submit(_check_sub, w): w for w in SUBDOMAIN_WORDLIST}
-            done = 0
-            for future in as_completed(futures):
-                done += 1
-                if done % 50 == 0:
-                    _emit(f"  Brute force: {done}/{len(SUBDOMAIN_WORDLIST)} checked, {brute_found} found...")
-                sub, ips = future.result()
-                if sub:
-                    found.add(sub)
-                    brute_found += 1
-                    details[sub] = {"ips": ips}
+        done = 0
+        for _, result, _ in _iter_with_thread_fallback(
+            SUBDOMAIN_WORDLIST,
+            _check_sub,
+            max_workers=24,
+            emit=_emit,
+            warning="  ⚠️ Thread limit reached; brute-force switched to sequential checks.",
+        ):
+            done += 1
+            if done % 50 == 0:
+                _emit(f"  Brute force: {done}/{len(SUBDOMAIN_WORDLIST)} checked, {brute_found} found...")
+            sub, ips = result or (None, None)
+            if sub:
+                found.add(sub)
+                brute_found += 1
+                details[sub] = {"ips": ips}
 
         _emit(f"  Brute force found {brute_found} additional subdomains")
 
@@ -241,14 +272,17 @@ def subdomain_enumerate(target, mode="passive", stream_callback=None):
                 continue
         return {"subdomain": sub, "ips": ips, "http_status": http_status, "title": title}
 
-    with ThreadPoolExecutor(max_workers=30) as executor:
-        futures = {executor.submit(_resolve_and_check, s): s for s in found}
-        for future in as_completed(futures):
-            result = future.result()
-            if result:
-                resolved.append(result)
-                if result["http_status"]:
-                    live_http.append(result)
+    for _, result, _ in _iter_with_thread_fallback(
+        found,
+        _resolve_and_check,
+        max_workers=16,
+        emit=_emit,
+        warning="  ⚠️ Thread limit reached; host resolution switched to sequential checks.",
+    ):
+        if result:
+            resolved.append(result)
+            if result["http_status"]:
+                live_http.append(result)
 
     # ── Phase 5: Takeover checks ──
     _emit("🔓 Checking for subdomain takeover...")

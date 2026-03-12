@@ -23,6 +23,17 @@ def _normalize_host(target: str):
     return (parsed.netloc or parsed.path).split("/")[0]
 
 
+def _is_runtime_resource_limit_error(exc: Exception):
+    msg = str(exc or "").lower()
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) in {11, 35}:
+        return True
+    return (
+        "resource temporarily unavailable" in msg
+        or "can't start new thread" in msg
+        or "cannot allocate memory" in msg
+    )
+
+
 def run_naabu(
     target: str,
     scan_type: str = "top100",
@@ -81,7 +92,29 @@ def run_naabu(
     emit(stream_callback, "tool_info", {
         "message": f"Running Naabu ({profile}) against {host}",
     })
-    result = run_command(cmd, timeout=timeout, stream_callback=stream_callback)
+    try:
+        result = run_command(cmd, timeout=timeout, stream_callback=stream_callback)
+    except Exception as exc:
+        if not _is_runtime_resource_limit_error(exc):
+            raise
+        emit(stream_callback, "coverage_degraded", {
+            "tool": "run_naabu",
+            "code": "RUNTIME_RESOURCE_LIMIT",
+            "message": "Naabu could not execute due runtime resource limits.",
+            "fallback": "internal-port-scan",
+        })
+        fallback = port_scan(
+            target=host,
+            scan_type=profile,
+            timeout=min(int(timeout), 180),
+            stream_callback=stream_callback,
+        )
+        return (
+            "COVERAGE DOWNGRADE: naabu execution blocked by runtime resource limits; "
+            "internal port scanner fallback executed.\n"
+            f"Naabu runtime error: {str(exc)}\n\n"
+            f"{fallback}"
+        )
 
     write_text(stdout_file, result["stdout"])
     write_text(stderr_file, result["stderr"])

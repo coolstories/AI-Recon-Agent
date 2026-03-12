@@ -7,11 +7,14 @@ from unittest.mock import patch
 
 from tools import aquatone_scan
 from tools import arjun_scan
+from tools import dns_recon
 from tools import ffuf_scan
 from tools import gitleaks_scan
 from tools import naabu_scan
 from tools import nuclei_scan
+from tools import port_scanner
 from tools import semgrep_scan
+from tools import subdomain_enum
 from tools import testssl_scan
 from tools import trufflehog_scan
 from tools import waybackurls_scan
@@ -70,6 +73,19 @@ class WrapperBinaryResolutionTests(unittest.TestCase):
         self.assertIn("COVERAGE DOWNGRADE", out)
         self.assertIn("ERROR: missing naabu", out)
         self.assertIn("PORT_SCAN_FALLBACK_OK", out)
+
+    def test_naabu_runtime_resource_limit_uses_internal_port_scan_fallback(self):
+        with patch(
+            "tools.naabu_scan.find_binary_or_auto_install",
+            return_value=("naabu", "/usr/local/bin/naabu", ""),
+        ), patch(
+            "tools.naabu_scan.run_command",
+            side_effect=OSError(11, "Resource temporarily unavailable"),
+        ), patch("tools.naabu_scan.port_scan", return_value="PORT_SCAN_RESOURCE_FALLBACK_OK"):
+            out = naabu_scan.run_naabu("https://example.com", timeout=20)
+        self.assertIn("COVERAGE DOWNGRADE", out)
+        self.assertIn("resource", out.lower())
+        self.assertIn("PORT_SCAN_RESOURCE_FALLBACK_OK", out)
 
     def test_wpscan_missing_binary_runs_wordpress_fallback_assessment(self):
         with patch(
@@ -164,6 +180,93 @@ class SSLRetryBehaviorTests(unittest.TestCase):
         self.assertIn("host=example.com", out)
         self.assertIn("resolved_ips=2", out)
         self.assertIn("attempts=", out)
+
+
+class ThreadExhaustionFallbackTests(unittest.TestCase):
+    def test_dns_recon_thread_limit_falls_back_to_sequential(self):
+        events = []
+
+        def cb(event_type, data):
+            events.append(str(data.get("message", "")))
+
+        def fake_resolve(domain, rtype, timeout=5):
+            if rtype == "A" and domain == "example.com":
+                return ["93.184.216.34"]
+            if rtype == "NS" and domain == "example.com":
+                return ["ns1.example.com."]
+            if rtype == "SRV" and domain == "_http._tcp.example.com":
+                return ["0 5 80 example.com."]
+            return []
+
+        with patch("tools.dns_recon._resolve", side_effect=fake_resolve), patch(
+            "tools.dns_recon._attempt_zone_transfer", return_value=None
+        ), patch(
+            "tools.dns_recon.ThreadPoolExecutor", side_effect=RuntimeError("can't start new thread")
+        ):
+            out = dns_recon.dns_recon("example.com", stream_callback=cb)
+
+        self.assertIn("DNS RECONNAISSANCE for example.com", out)
+        self.assertTrue(any("thread limit reached" in msg.lower() for msg in events))
+
+    def test_subdomain_enum_thread_limit_falls_back_to_sequential(self):
+        events = []
+
+        def cb(event_type, data):
+            events.append(str(data.get("message", "")))
+
+        def fake_resolve(name, record_type="A"):
+            if record_type == "A" and name in {"www.example.com", "api.example.com"}:
+                return ["93.184.216.34"]
+            return []
+
+        def fake_get(url, *args, **kwargs):
+            class Resp:
+                def __init__(self, status_code=200, text=""):
+                    self.status_code = status_code
+                    self.text = text
+                    self.headers = {}
+
+                def json(self):
+                    return []
+
+            if "crt.sh" in url:
+                return Resp(status_code=200, text="[]")
+            return Resp(status_code=200, text="<title>OK</title>")
+
+        with patch("tools.subdomain_enum.SUBDOMAIN_WORDLIST", ["www", "api"]), patch(
+            "tools.subdomain_enum._resolve", side_effect=fake_resolve
+        ), patch("tools.subdomain_enum.requests.get", side_effect=fake_get), patch(
+            "tools.subdomain_enum.ThreadPoolExecutor", side_effect=RuntimeError("can't start new thread")
+        ):
+            out = subdomain_enum.subdomain_enumerate("example.com", mode="active", stream_callback=cb)
+
+        self.assertIn("SUBDOMAIN ENUMERATION for example.com", out)
+        self.assertIn("www.example.com", out)
+        self.assertTrue(any("thread limit reached" in msg.lower() for msg in events))
+
+    def test_port_scan_thread_limit_falls_back_to_sequential(self):
+        events = []
+
+        def cb(event_type, data):
+            events.append(str(data.get("message", "")))
+
+        with patch("tools.port_scanner.socket.gethostbyname", return_value="93.184.216.34"), patch(
+            "tools.port_scanner._scan_port", side_effect=lambda host, port, timeout=2: port if port == 80 else None
+        ), patch(
+            "tools.port_scanner._grab_banner", return_value=("HTTP", "Server: nginx", "1.25.0")
+        ), patch(
+            "tools.port_scanner.ThreadPoolExecutor", side_effect=RuntimeError("can't start new thread")
+        ):
+            out = port_scanner.port_scan(
+                "example.com",
+                scan_type="custom",
+                custom_ports="80,443",
+                stream_callback=cb,
+            )
+
+        self.assertIn("PORT SCAN RESULTS", out)
+        self.assertIn("PORT 80/tcp", out)
+        self.assertTrue(any("thread limit reached" in msg.lower() for msg in events))
 
 
 if __name__ == "__main__":

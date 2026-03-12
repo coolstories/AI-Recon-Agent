@@ -35,6 +35,33 @@ SRV_SERVICES = [
 ]
 
 
+def _iter_with_thread_fallback(items, worker_fn, max_workers, emit=None, warning=None):
+    """Run worker_fn over items in a thread pool, but degrade to sequential on thread exhaustion."""
+    seq_items = list(items)
+    if not seq_items:
+        return
+
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as executor:
+            futures = {executor.submit(worker_fn, item): item for item in seq_items}
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    yield item, future.result(), None
+                except Exception as exc:
+                    yield item, None, exc
+    except RuntimeError as exc:
+        if "can't start new thread" not in str(exc).lower():
+            raise
+        if emit:
+            emit(warning or "  ⚠️ Thread limit reached; switching to sequential mode.")
+        for item in seq_items:
+            try:
+                yield item, worker_fn(item), None
+            except Exception as item_exc:
+                yield item, None, item_exc
+
+
 def _resolve(domain, rtype, timeout=5):
     """Resolve DNS records."""
     if not DNS_AVAILABLE:
@@ -189,13 +216,16 @@ def dns_recon(target, stream_callback=None):
             return {"service": svc, "records": results}
         return None
 
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {executor.submit(_check_srv, svc): svc for svc in SRV_SERVICES}
-        for future in as_completed(futures):
-            result = future.result()
-            if result:
-                srv_found.append(result)
-                _emit(f"  ✅ {result['service']}: {', '.join(result['records'][:2])}")
+    for _, result, _ in _iter_with_thread_fallback(
+        SRV_SERVICES,
+        _check_srv,
+        max_workers=20,
+        emit=_emit,
+        warning="  ⚠️ Thread limit reached; SRV discovery switched to sequential checks.",
+    ):
+        if result:
+            srv_found.append(result)
+            _emit(f"  ✅ {result['service']}: {', '.join(result['records'][:2])}")
 
     # ── Phase 5: Wildcard detection ──
     _emit("🔍 Checking for DNS wildcards...")

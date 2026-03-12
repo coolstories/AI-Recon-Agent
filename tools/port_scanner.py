@@ -86,6 +86,33 @@ TOP_1000 = sorted(COMMON_PORTS.keys()) + [
 ]
 
 
+def _iter_with_thread_fallback(items, worker_fn, max_workers, emit=None, warning=None):
+    """Run worker_fn over items concurrently; degrade to sequential on thread exhaustion."""
+    seq_items = list(items)
+    if not seq_items:
+        return
+
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, int(max_workers))) as executor:
+            futures = {executor.submit(worker_fn, item): item for item in seq_items}
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    yield item, future.result(), None
+                except Exception as exc:
+                    yield item, None, exc
+    except RuntimeError as exc:
+        if "can't start new thread" not in str(exc).lower():
+            raise
+        if emit:
+            emit(warning or "  ⚠️ Thread limit reached; switching to sequential mode.")
+        for item in seq_items:
+            try:
+                yield item, worker_fn(item), None
+            except Exception as item_exc:
+                yield item, None, item_exc
+
+
 def _grab_banner(host, port, timeout=3):
     """Grab service banner from an open port."""
     banner = ""
@@ -218,19 +245,25 @@ def port_scan(target, scan_type="top100", custom_ports="", timeout=120, stream_c
 
     # Phase 1: Fast port discovery
     open_ports = []
-    threads = min(200, len(ports))
+    threads = min(64, len(ports))
     scanned = 0
 
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        futures = {executor.submit(_scan_port, ip, p, 2): p for p in ports}
-        for future in as_completed(futures):
-            scanned += 1
-            if scanned % 100 == 0:
-                _emit(f"  Scanned {scanned}/{len(ports)} ports...")
-            result = future.result()
-            if result:
-                open_ports.append(result)
-                _emit(f"  ✅ Port {result} OPEN")
+    def _scan_one(port):
+        return _scan_port(ip, port, 2)
+
+    for _, result, _ in _iter_with_thread_fallback(
+        ports,
+        _scan_one,
+        max_workers=threads,
+        emit=_emit,
+        warning="  ⚠️ Thread limit reached; port discovery switched to sequential mode.",
+    ):
+        scanned += 1
+        if scanned % 100 == 0:
+            _emit(f"  Scanned {scanned}/{len(ports)} ports...")
+        if result:
+            open_ports.append(result)
+            _emit(f"  ✅ Port {result} OPEN")
 
     if not open_ports:
         elapsed = time.time() - start_time
@@ -241,20 +274,26 @@ def port_scan(target, scan_type="top100", custom_ports="", timeout=120, stream_c
 
     # Phase 2: Banner grabbing on open ports
     results = []
-    with ThreadPoolExecutor(max_workers=min(20, len(open_ports))) as executor:
-        futures = {executor.submit(_grab_banner, ip, p, 3): p for p in open_ports}
-        for future in as_completed(futures):
-            port = futures[future]
-            service, banner, version = future.result()
-            if service is None:
-                service = COMMON_PORTS.get(port, "Unknown")
-            results.append({
-                "port": port,
-                "service": service,
-                "banner": banner,
-                "version": version,
-                "vuln_hint": "",
-            })
+    def _grab_one(port):
+        return _grab_banner(ip, port, 3)
+
+    for port, payload, _ in _iter_with_thread_fallback(
+        open_ports,
+        _grab_one,
+        max_workers=min(12, len(open_ports)),
+        emit=_emit,
+        warning="  ⚠️ Thread limit reached; banner grabbing switched to sequential mode.",
+    ):
+        service, banner, version = payload or (None, "", "")
+        if service is None:
+            service = COMMON_PORTS.get(port, "Unknown")
+        results.append({
+            "port": port,
+            "service": service,
+            "banner": banner,
+            "version": version,
+            "vuln_hint": "",
+        })
 
     # Add vuln hints
     for r in results:
