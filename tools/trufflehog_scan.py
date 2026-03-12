@@ -4,10 +4,9 @@ import json
 from pathlib import Path
 
 from tools._cli_runner import (
-    build_missing_binary_error,
     create_artifact_dir,
     emit,
-    find_binary,
+    find_binary_or_auto_install,
     run_command,
     write_text,
 )
@@ -43,9 +42,14 @@ def run_trufflehog(
     if mode not in {"filesystem", "git"}:
         mode = "filesystem"
 
-    binary_name, _ = find_binary(["trufflehog"])
+    binary_name, _, missing_error = find_binary_or_auto_install(
+        ["trufflehog"],
+        tool_name="TruffleHog",
+        stream_callback=stream_callback,
+        install_timeout=max(120, int(timeout)),
+    )
     if not binary_name:
-        return build_missing_binary_error(["trufflehog"], "TruffleHog")
+        return missing_error
 
     artifact_dir = create_artifact_dir("trufflehog", artifact_session)
     stdout_file = artifact_dir / "stdout.jsonl"

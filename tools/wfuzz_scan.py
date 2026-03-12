@@ -4,10 +4,9 @@ import json
 import os
 
 from tools._cli_runner import (
-    build_missing_binary_error,
     create_artifact_dir,
     emit,
-    find_binary,
+    find_binary_or_auto_install,
     run_command,
     write_text,
 )
@@ -77,9 +76,14 @@ def run_wfuzz(
     if "FUZZ" not in target:
         target = target.rstrip("/") + "/FUZZ"
 
-    binary_name, _ = find_binary(["wfuzz"])
+    binary_name, _, missing_error = find_binary_or_auto_install(
+        ["wfuzz"],
+        tool_name="Wfuzz",
+        stream_callback=stream_callback,
+        install_timeout=max(120, int(timeout)),
+    )
     if not binary_name:
-        return build_missing_binary_error(["wfuzz"], "Wfuzz")
+        return missing_error
 
     artifact_dir = create_artifact_dir("wfuzz", artifact_session)
     report_file = artifact_dir / "wfuzz_report.json"

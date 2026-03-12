@@ -3,10 +3,9 @@ from __future__ import annotations
 import json
 
 from tools._cli_runner import (
-    build_missing_binary_error,
     create_artifact_dir,
     emit,
-    find_binary,
+    find_binary_or_auto_install,
     run_command,
     write_text,
 )
@@ -44,9 +43,14 @@ def run_arjun(
     if not target.startswith("http"):
         target = f"https://{target}"
 
-    binary_name, _ = find_binary(["arjun"])
+    binary_name, _, missing_error = find_binary_or_auto_install(
+        ["arjun"],
+        tool_name="Arjun",
+        stream_callback=stream_callback,
+        install_timeout=max(120, int(timeout)),
+    )
     if not binary_name:
-        return build_missing_binary_error(["arjun"], "Arjun")
+        return missing_error
 
     verb = (method or "GET").strip().upper()
     if verb not in {"GET", "POST"}:

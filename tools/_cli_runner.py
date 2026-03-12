@@ -4,7 +4,10 @@ import os
 import re
 import shlex
 import shutil
+import site
 import subprocess
+import sys
+import sysconfig
 import threading
 import time
 from datetime import datetime
@@ -22,6 +25,8 @@ INSTALL_HINTS = {
     "waybackurls": "Install: go install github.com/tomnomnom/waybackurls@latest",
     "arjun": "Install: pip install arjun",
     "wfuzz": "Install: pip install wfuzz",
+    "ffuf": "Install: brew install ffuf or go install github.com/ffuf/ffuf/v2@latest",
+    "nuclei": "Install: brew install nuclei or go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
     "semgrep": "Install: pip install semgrep",
     "wpscan": "Install: brew install wpscanteam/tap/wpscan or gem install wpscan; Docker: docker run --rm wpscanteam/wpscan --help",
 }
@@ -31,12 +36,57 @@ AUTO_INSTALL_LAST_ATTEMPT_TS = 0.0
 AUTO_INSTALL_LAST_SUMMARY = "not_attempted"
 AUTO_INSTALL_COOLDOWN_SEC = 300
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-COMMON_BIN_DIRS = [
-    Path.home() / ".local" / "bin",
-    Path.home() / "go" / "bin",
-    Path("/opt/homebrew/bin"),
-    Path("/usr/local/bin"),
-]
+
+
+def _python_user_bin_dirs():
+    candidates = []
+    try:
+        user_base = site.getuserbase()
+        if user_base:
+            candidates.append(Path(user_base) / "bin")
+    except Exception:
+        pass
+
+    try:
+        scripts_dir = sysconfig.get_path("scripts")
+        if scripts_dir:
+            candidates.append(Path(scripts_dir))
+    except Exception:
+        pass
+
+    # Common macOS user-site script path (python.org / system Python).
+    candidates.append(Path.home() / "Library" / "Python" / f"{sys.version_info.major}.{sys.version_info.minor}" / "bin")
+
+    out = []
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(candidate)
+    return out
+
+
+def _build_common_bin_dirs():
+    defaults = [
+        Path.home() / ".local" / "bin",
+        Path.home() / "go" / "bin",
+        Path("/opt/homebrew/bin"),
+        Path("/usr/local/bin"),
+    ]
+    out = []
+    seen = set()
+    for candidate in [*defaults, *_python_user_bin_dirs()]:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(candidate)
+    return out
+
+
+COMMON_BIN_DIRS = _build_common_bin_dirs()
 
 
 def emit(stream_callback, event_type: str, data: dict):

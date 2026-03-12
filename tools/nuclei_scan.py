@@ -3,25 +3,7 @@ import threading
 import time
 import json
 import os
-import shutil
-
-
-def _find_nuclei_binary():
-    """Find nuclei binary from PATH or common local bin directories."""
-    nuclei_bin = shutil.which("nuclei")
-    if nuclei_bin:
-        return nuclei_bin
-
-    home = os.path.expanduser("~")
-    candidates = [
-        os.path.join(home, ".local", "bin", "nuclei"),
-        "/usr/local/bin/nuclei",
-        "/opt/homebrew/bin/nuclei",
-    ]
-    for candidate in candidates:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+from tools._cli_runner import find_binary_or_auto_install
 
 
 def run_nuclei(target: str, templates: str = "auto", severity: str = "critical,high,medium",
@@ -40,12 +22,23 @@ def run_nuclei(target: str, templates: str = "auto", severity: str = "critical,h
     if not target.startswith("http"):
         target = f"https://{target}"
 
-    nuclei_bin = _find_nuclei_binary()
+    nuclei_bin, _, missing_error = find_binary_or_auto_install(
+        ["nuclei"],
+        tool_name="Nuclei",
+        stream_callback=stream_callback,
+        install_timeout=max(180, int(timeout)),
+    )
     if not nuclei_bin:
         fallback_sections = []
         if stream_callback:
+            stream_callback("coverage_degraded", {
+                "tool": "run_nuclei",
+                "code": "BIN_MISSING",
+                "message": "nuclei unavailable after auto-install attempt.",
+                "fallback": "testssl + exposed paths",
+            })
             stream_callback("tool_info", {
-                "message": "nuclei not installed; running fallback checks (testssl + exposed paths).",
+                "message": "nuclei unavailable; running fallback checks (testssl + exposed paths).",
             })
         try:
             from tools.testssl_scan import run_testssl
@@ -71,9 +64,9 @@ def run_nuclei(target: str, templates: str = "auto", severity: str = "critical,h
             fallback_sections.append(f"exposed-path fallback error: {str(e)}")
 
         return (
-            "nuclei not installed. Fallback checks executed.\n\n"
+            "COVERAGE DOWNGRADE: nuclei unavailable; fallback checks executed.\n"
+            f"{missing_error}\n\n"
             + "\n\n".join(fallback_sections)
-            + "\n\nInstall missing scanners with: ./scripts/install_security_tools.sh"
         )
 
     # Build nuclei command

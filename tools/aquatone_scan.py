@@ -4,10 +4,9 @@ import json
 from pathlib import Path
 
 from tools._cli_runner import (
-    build_missing_binary_error,
     create_artifact_dir,
     emit,
-    find_binary,
+    find_binary_or_auto_install,
     run_command,
     write_text,
 )
@@ -37,9 +36,14 @@ def run_aquatone(
     if not target_list:
         return "ERROR: targets are required"
 
-    binary_name, _ = find_binary(["aquatone"])
+    binary_name, _, missing_error = find_binary_or_auto_install(
+        ["aquatone"],
+        tool_name="Aquatone",
+        stream_callback=stream_callback,
+        install_timeout=max(180, int(timeout)),
+    )
     if not binary_name:
-        return build_missing_binary_error(["aquatone"], "Aquatone")
+        return missing_error
 
     artifact_dir = create_artifact_dir("aquatone", artifact_session)
     input_file = artifact_dir / "targets.txt"

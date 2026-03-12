@@ -8,7 +8,6 @@ import threading
 import uuid
 import time
 import re
-import shutil
 import ipaddress
 import traceback
 from datetime import datetime
@@ -2480,13 +2479,6 @@ def run_agent_worker(
             return
 
         if mode == "deep":
-            if not shutil.which("waybackurls"):
-                _record_coverage_degraded(
-                    "run_waybackurls",
-                    "waybackurls binary not found on PATH.",
-                    fallback="robots/sitemap/archive endpoint discovery fallback",
-                    code="BIN_MISSING",
-                )
             netlas_key = (os.getenv("NETLAS_API_KEY", "") or "").strip()
             if not netlas_key:
                 netlas_disabled = True
@@ -2715,25 +2707,25 @@ def run_agent_worker(
                                 artifact_session=session_id,
                             )
                         elif func_name == "run_waybackurls":
-                            if shutil.which("waybackurls"):
-                                result = run_waybackurls(
-                                    args["target"],
-                                    args.get("timeout", 120),
-                                    stream_callback=tool_stream_callback,
-                                    artifact_session=session_id,
-                                )
-                            else:
+                            result = run_waybackurls(
+                                args["target"],
+                                args.get("timeout", 120),
+                                stream_callback=tool_stream_callback,
+                                artifact_session=session_id,
+                            )
+                            if _tool_result_has_failure_signal(result):
                                 _record_coverage_degraded(
                                     "run_waybackurls",
-                                    "waybackurls binary unavailable during tool execution.",
+                                    "run_waybackurls returned a failure signal; executing fallback endpoint discovery.",
                                     fallback="robots/sitemap/archive endpoint discovery fallback",
                                     code="BIN_MISSING",
                                 )
-                                result = _run_waybackurls_fallback(
+                                fallback_result = _run_waybackurls_fallback(
                                     args["target"],
                                     args.get("timeout", 120),
                                     stream_callback=tool_stream_callback,
                                 )
+                                result = f"{result}\n\n{fallback_result}"
                         elif func_name == "run_arjun":
                             result = run_arjun(
                                 args["target_url"],

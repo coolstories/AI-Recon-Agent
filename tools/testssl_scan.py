@@ -4,10 +4,9 @@ import json
 from urllib.parse import urlparse
 
 from tools._cli_runner import (
-    build_missing_binary_error,
     create_artifact_dir,
     emit,
-    find_binary,
+    find_binary_or_auto_install,
     run_command,
     write_text,
 )
@@ -45,6 +44,14 @@ def _count_findings(report_path):
     return count
 
 
+def _python_tls_fallback(target: str):
+    try:
+        from tools.web_request import check_ssl_cert
+        return check_ssl_cert(target)
+    except Exception as exc:
+        return f"SSL CHECK ERROR: Python TLS fallback failed: {str(exc)}"
+
+
 def run_testssl(
     target: str,
     mode: str = "fast",
@@ -56,9 +63,25 @@ def run_testssl(
     if not norm_target:
         return "ERROR: target is required"
 
-    binary_name, _ = find_binary(["testssl.sh", "testssl"])
+    binary_name, _, missing_error = find_binary_or_auto_install(
+        ["testssl.sh", "testssl"],
+        tool_name="testssl.sh",
+        stream_callback=stream_callback,
+        install_timeout=max(180, int(timeout)),
+    )
     if not binary_name:
-        return build_missing_binary_error(["testssl.sh", "testssl"], "testssl.sh")
+        emit(stream_callback, "coverage_degraded", {
+            "tool": "run_testssl",
+            "code": "BIN_MISSING",
+            "message": "testssl.sh unavailable after auto-install attempt.",
+            "fallback": "python-ssl-cert-probe",
+        })
+        fallback = _python_tls_fallback(norm_target)
+        return (
+            "COVERAGE DOWNGRADE: testssl.sh unavailable; executed Python TLS certificate fallback.\n"
+            f"{missing_error}\n\n"
+            f"{fallback}"
+        )
 
     profile = (mode or "fast").strip().lower()
     if profile not in {"fast", "full"}:

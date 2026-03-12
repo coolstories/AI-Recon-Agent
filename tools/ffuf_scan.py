@@ -1,9 +1,18 @@
-import subprocess
-import threading
-import time
 import json
 import os
-import shutil
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
+
+import requests
+
+from tools._cli_runner import (
+    create_artifact_dir,
+    emit,
+    find_binary_or_auto_install,
+    run_command,
+    write_text,
+)
 
 
 # Common wordlists (check which exist on the system)
@@ -79,30 +88,134 @@ def _find_wordlist(name="common"):
     return None
 
 
-def _write_builtin_wordlist():
-    """Write the built-in wordlist to a temp file."""
+def _write_builtin_wordlist(artifact_dir=None):
+    """Write the built-in wordlist to a file scoped to this run."""
+    if artifact_dir is not None:
+        path = artifact_dir / "ffuf_builtin_wordlist.txt"
+        write_text(path, "\n".join(BUILTIN_WORDLIST))
+        return str(path)
     path = "/tmp/ffuf_builtin_wordlist.txt"
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(BUILTIN_WORDLIST))
     return path
 
 
-def _find_ffuf_binary():
-    """Find ffuf binary from PATH or common local bin directories."""
-    ffuf_bin = shutil.which("ffuf")
-    if ffuf_bin:
-        return ffuf_bin
+def _load_word_candidates(wl_path: str, max_words: int):
+    out = []
+    try:
+        with open(wl_path, "r", encoding="utf-8", errors="replace") as handle:
+            for raw in handle:
+                value = raw.strip()
+                if not value or value.startswith("#"):
+                    continue
+                out.append(value)
+                if len(out) >= max_words:
+                    break
+    except Exception:
+        return []
+    return out
 
-    home = os.path.expanduser("~")
-    candidates = [
-        os.path.join(home, ".local", "bin", "ffuf"),
-        "/usr/local/bin/ffuf",
-        "/opt/homebrew/bin/ffuf",
+
+def _wfuzz_succeeded(text: str):
+    blob = str(text or "").strip()
+    if not blob:
+        return False
+    if blob.startswith("ERROR:"):
+        return False
+    if "binary not found on PATH" in blob:
+        return False
+    return True
+
+
+def _run_internal_http_fallback(target_url: str, wl_path: str, threads: int, timeout: int, stream_callback=None):
+    max_words = 600 if int(timeout) >= 120 else 300
+    candidates = _load_word_candidates(wl_path, max_words=max_words)
+    if not candidates:
+        candidates = list(BUILTIN_WORDLIST[:200])
+
+    interesting_status = {200, 201, 204, 301, 302, 307, 308, 401, 403, 405, 500}
+    scan_budget = max(10, int(timeout))
+    start_time = time.time()
+    deadline = start_time + scan_budget
+    request_timeout = 4 if int(timeout) >= 60 else 3
+    max_workers = max(1, min(int(threads or 10), 24))
+    results = []
+    seen = set()
+
+    emit(stream_callback, "tool_info", {
+        "message": (
+            f"Running internal HTTP path fallback against {target_url} "
+            f"({len(candidates)} candidates, workers={max_workers})"
+        ),
+    })
+
+    def _probe(word):
+        if time.time() > deadline:
+            return None
+        url = f"{target_url}/{word.lstrip('/')}"
+        try:
+            resp = requests.get(
+                url,
+                timeout=request_timeout,
+                allow_redirects=False,
+                verify=True,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; SecurityAudit/1.0)"},
+            )
+        except Exception:
+            return None
+        if resp.status_code not in interesting_status:
+            return None
+        return {
+            "status": int(resp.status_code),
+            "length": len(resp.content or b""),
+            "url": url,
+            "redirectlocation": resp.headers.get("Location", ""),
+        }
+
+    processed = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_probe, word) for word in candidates]
+        for future in as_completed(futures):
+            processed += 1
+            if time.time() > deadline:
+                break
+            item = future.result()
+            if item:
+                key = (item["status"], item["url"], item["redirectlocation"])
+                if key not in seen:
+                    seen.add(key)
+                    results.append(item)
+            if processed % 25 == 0:
+                emit(stream_callback, "ffuf_progress", {
+                    "elapsed": round(max(0.0, time.time() - start_time), 1),
+                    "timeout": timeout,
+                    "fallback": True,
+                    "processed": processed,
+                    "total": len(candidates),
+                })
+
+    elapsed = round(max(0.0, time.time() - start_time), 1)
+    lines = [
+        "=== Internal HTTP Path Fallback Scan ===",
+        f"Target: {target_url}",
+        f"Candidates tested: {min(processed, len(candidates))}",
+        f"Completed in {elapsed}s | Found {len(results)} results",
+        "",
     ]
-    for candidate in candidates:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    if results:
+        lines.append(f"{'Status':<8} {'Size':<10} {'Path':<50} {'Redirect'}")
+        lines.append("-" * 90)
+        for item in sorted(results, key=lambda x: x.get("status", 0)):
+            status = item.get("status", "?")
+            length = item.get("length", 0)
+            url = item.get("url", "?")
+            redir = item.get("redirectlocation", "")
+            path = url.replace(target_url, "") if isinstance(url, str) else str(url)
+            redir_str = f"-> {redir}" if redir else ""
+            lines.append(f"{status:<8} {_format_size(length):<10} {path:<50} {redir_str}")
+    else:
+        lines.append("No interesting paths discovered.")
+    return "\n".join(lines)
 
 
 def run_ffuf(target_url: str, mode: str = "dir", wordlist: str = "common",
@@ -123,157 +236,176 @@ def run_ffuf(target_url: str, mode: str = "dir", wordlist: str = "common",
         target_url = f"https://{target_url}"
     target_url = target_url.rstrip("/")
 
-    # Resolve wordlist
+    artifact_dir = create_artifact_dir("ffuf")
+    stdout_file = artifact_dir / "stdout.log"
+    stderr_file = artifact_dir / "stderr.log"
+    report_file = artifact_dir / "ffuf_output.json"
+    meta_file = artifact_dir / "meta.json"
+
     if os.path.isfile(wordlist):
         wl_path = wordlist
     else:
         wl_path = _find_wordlist(wordlist)
     if not wl_path:
-        wl_path = _write_builtin_wordlist()
-        if stream_callback:
-            stream_callback("tool_info", {"message": "Using built-in wordlist (200 paths). Install seclists for more: brew install seclists"})
+        wl_path = _write_builtin_wordlist(artifact_dir)
+        emit(stream_callback, "tool_info", {
+            "message": "Using built-in ffuf wordlist (200 paths). Install seclists for broader coverage.",
+        })
 
-    ffuf_bin = _find_ffuf_binary()
+    ffuf_bin, _, missing_error = find_binary_or_auto_install(
+        ["ffuf"],
+        tool_name="ffuf",
+        stream_callback=stream_callback,
+        install_timeout=max(120, int(timeout)),
+    )
     if not ffuf_bin:
-        # Optional fallback: try wfuzz wrapper when ffuf is unavailable.
+        emit(stream_callback, "coverage_degraded", {
+            "tool": "run_ffuf",
+            "code": "BIN_MISSING",
+            "message": "ffuf unavailable after auto-install attempt.",
+            "fallback": "wfuzz -> internal-http-path-probe",
+        })
+        wfuzz_output = ""
         try:
             from tools.wfuzz_scan import run_wfuzz
-            if stream_callback:
-                stream_callback("tool_info", {
-                    "message": "ffuf not installed; attempting wfuzz fallback.",
-                })
-            fallback = run_wfuzz(
+            emit(stream_callback, "tool_info", {
+                "message": "ffuf unavailable; attempting wfuzz fallback.",
+            })
+            wfuzz_output = run_wfuzz(
                 target_url=target_url,
                 wordlist=wordlist,
                 hide_codes="404",
-                threads=min(threads, 25),
+                threads=min(int(threads), 25),
                 timeout=timeout,
                 stream_callback=stream_callback,
             )
-            return (
-                "ffuf not installed. Fallback executed with wfuzz.\n"
-                f"{fallback}\n\n"
-                "Install ffuf/nuclei quickly with: ./scripts/install_security_tools.sh"
-            )
-        except Exception:
-            return (
-                "ERROR: ffuf not installed.\n"
-                "Install missing scanners with: ./scripts/install_security_tools.sh\n"
-                "Manual fallback: install ffuf or wfuzz."
-            )
+            if _wfuzz_succeeded(wfuzz_output):
+                return (
+                    "COVERAGE DOWNGRADE: ffuf unavailable; wfuzz fallback executed.\n"
+                    f"{missing_error}\n\n{wfuzz_output}"
+                )
+        except Exception as exc:
+            wfuzz_output = f"wfuzz fallback error: {str(exc)}"
 
-    # Build ffuf command
-    cmd = [ffuf_bin, "-u", f"{target_url}/FUZZ", "-w", wl_path,
-           "-t", str(threads), "-timeout", "10",
-           "-mc", "200,201,204,301,302,307,401,403,405,500",
-           "-o", "/tmp/ffuf_output.json", "-of", "json",
-           "-s"]  # silent mode, JSON output
+        internal = _run_internal_http_fallback(
+            target_url=target_url,
+            wl_path=wl_path,
+            threads=max(1, min(int(threads), 20)),
+            timeout=max(15, int(timeout)),
+            stream_callback=stream_callback,
+        )
+        return (
+            "COVERAGE DOWNGRADE: ffuf and wfuzz unavailable; internal HTTP path fallback executed.\n"
+            f"{missing_error}\n\n"
+            f"WFUZZ_RESULT:\n{wfuzz_output or 'wfuzz fallback unavailable'}\n\n"
+            f"{internal}"
+        )
+
+    cmd = [
+        ffuf_bin,
+        "-u",
+        f"{target_url}/FUZZ",
+        "-w",
+        wl_path,
+        "-t",
+        str(threads),
+        "-timeout",
+        "10",
+        "-mc",
+        "200,201,204,301,302,307,401,403,405,500",
+        "-o",
+        str(report_file),
+        "-of",
+        "json",
+        "-s",
+    ]
 
     if extensions:
         cmd.extend(["-e", ",".join(f".{e.strip('.')}" for e in extensions.split(","))])
 
     if mode == "vhost":
-        # For vhost fuzzing, we need a different approach
-        from urllib.parse import urlparse
         parsed = urlparse(target_url)
-        cmd = [ffuf_bin, "-u", target_url, "-w", wl_path,
-               "-H", f"Host: FUZZ.{parsed.hostname}",
-               "-t", str(threads), "-timeout", "10",
-               "-mc", "200,201,204,301,302,307",
-               "-fs", "0",  # filter empty responses
-               "-o", "/tmp/ffuf_output.json", "-of", "json",
-               "-s"]
+        cmd = [
+            ffuf_bin,
+            "-u",
+            target_url,
+            "-w",
+            wl_path,
+            "-H",
+            f"Host: FUZZ.{parsed.hostname}",
+            "-t",
+            str(threads),
+            "-timeout",
+            "10",
+            "-mc",
+            "200,201,204,301,302,307",
+            "-fs",
+            "0",
+            "-o",
+            str(report_file),
+            "-of",
+            "json",
+            "-s",
+        ]
 
-    if stream_callback:
-        stream_callback("ffuf_start", {
-            "target": target_url,
-            "mode": mode,
-            "wordlist": os.path.basename(wl_path),
-        })
+    emit(stream_callback, "ffuf_start", {
+        "target": target_url,
+        "mode": mode,
+        "wordlist": os.path.basename(wl_path),
+    })
 
-    start_time = time.time()
-    
-    try:
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1
-        )
+    result = run_command(cmd, timeout=timeout, stream_callback=stream_callback)
+    write_text(stdout_file, result["stdout"])
+    write_text(stderr_file, result["stderr"])
+    write_text(meta_file, json.dumps({
+        "tool": "ffuf",
+        "command": result["command"],
+        "elapsed": result["elapsed"],
+        "exit_code": result["exit_code"],
+        "timed_out": result["timed_out"],
+        "target_url": target_url,
+        "mode": mode,
+        "wordlist": wl_path,
+        "extensions": extensions,
+        "threads": threads,
+    }, indent=2))
 
-        stdout_lines = []
-        stderr_lines = []
-
-        def read_stream(stream, line_list):
-            for line in iter(stream.readline, ''):
-                line_list.append(line)
-                if stream_callback and line.strip():
-                    stream_callback("ffuf_output", {"text": line})
-            stream.close()
-
-        t_out = threading.Thread(target=read_stream, args=(proc.stdout, stdout_lines), daemon=True)
-        t_err = threading.Thread(target=read_stream, args=(proc.stderr, stderr_lines), daemon=True)
-        t_out.start()
-        t_err.start()
-
-        last_update = start_time
-        while proc.poll() is None:
-            elapsed = time.time() - start_time
-            if stream_callback and time.time() - last_update >= 3:
-                stream_callback("ffuf_progress", {
-                    "elapsed": round(elapsed, 1),
-                    "timeout": timeout,
-                })
-                last_update = time.time()
-            if elapsed > timeout:
-                proc.kill()
-                t_out.join(timeout=2)
-                t_err.join(timeout=2)
-                break
-            time.sleep(0.2)
-
-        t_out.join(timeout=5)
-        t_err.join(timeout=5)
-
-        elapsed = round(time.time() - start_time, 1)
-
-        # Parse JSON output
-        results = []
+    findings = []
+    if report_file.exists():
         try:
-            with open("/tmp/ffuf_output.json") as f:
-                data = json.load(f)
-                results = data.get("results", [])
+            payload = json.loads(report_file.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                findings = payload.get("results", [])
         except Exception:
-            pass
+            findings = []
 
-        if stream_callback:
-            stream_callback("ffuf_done", {"elapsed": elapsed, "found": len(results)})
+    emit(stream_callback, "ffuf_done", {"elapsed": result["elapsed"], "found": len(findings)})
 
-        # Build output
-        output = []
-        output.append(f"=== ffuf Directory/File Scan: {target_url} ===")
-        output.append(f"Mode: {mode} | Wordlist: {os.path.basename(wl_path)} | Threads: {threads}")
-        output.append(f"Completed in {elapsed}s | Found {len(results)} results\n")
+    lines = [
+        f"=== ffuf Directory/File Scan: {target_url} ===",
+        f"Mode: {mode} | Wordlist: {os.path.basename(wl_path)} | Threads: {threads}",
+    ]
+    if result["timed_out"]:
+        lines.append(f"Timed out in {result['elapsed']}s | Found {len(findings)} results\n")
+    else:
+        lines.append(f"Completed in {result['elapsed']}s | Found {len(findings)} results\n")
 
-        if results:
-            output.append(f"{'Status':<8} {'Size':<10} {'Path':<50} {'Redirect'}")
-            output.append("-" * 90)
-            for r in sorted(results, key=lambda x: x.get("status", 0)):
-                status = r.get("status", "?")
-                length = r.get("length", 0)
-                url = r.get("url", r.get("input", {}).get("FUZZ", "?"))
-                redir = r.get("redirectlocation", "")
-                path = url.replace(target_url, "") if isinstance(url, str) else str(url)
-                size_str = _format_size(length)
-                redir_str = f"→ {redir}" if redir else ""
-                output.append(f"{status:<8} {size_str:<10} {path:<50} {redir_str}")
-        else:
-            output.append("No interesting paths discovered.")
+    if findings:
+        lines.append(f"{'Status':<8} {'Size':<10} {'Path':<50} {'Redirect'}")
+        lines.append("-" * 90)
+        for item in sorted(findings, key=lambda x: x.get("status", 0)):
+            status = item.get("status", "?")
+            length = item.get("length", 0)
+            url = item.get("url", item.get("input", {}).get("FUZZ", "?"))
+            redir = item.get("redirectlocation", "")
+            path = url.replace(target_url, "") if isinstance(url, str) else str(url)
+            redir_str = f"-> {redir}" if redir else ""
+            lines.append(f"{status:<8} {_format_size(length):<10} {path:<50} {redir_str}")
+    else:
+        lines.append("No interesting paths discovered.")
 
-        return "\n".join(output)
-
-    except FileNotFoundError:
-        return "ERROR: ffuf not installed. Install with: ./scripts/install_security_tools.sh"
-    except Exception as e:
-        return f"ERROR: {str(e)}"
+    lines.append(f"\nArtifacts: {artifact_dir}")
+    return "\n".join(lines)
 
 
 def _format_size(bytes_count):

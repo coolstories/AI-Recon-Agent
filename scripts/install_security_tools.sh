@@ -7,6 +7,57 @@ info() { printf "[INFO] %s\n" "$1"; }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 LOCAL_BIN="${HOME}/.local/bin"
+PYTHON_USER_BIN=""
+
+add_to_path() {
+  local dir="$1"
+  if [ -z "${dir}" ]; then
+    return 0
+  fi
+  case ":${PATH}:" in
+    *":${dir}:"*) ;;
+    *) export PATH="${dir}:${PATH}" ;;
+  esac
+}
+
+discover_python_user_bin() {
+  if ! has_cmd python3; then
+    return 0
+  fi
+  python3 - <<'PY'
+import os
+import site
+from pathlib import Path
+
+try:
+    base = site.getuserbase()
+except Exception:
+    base = ""
+if base:
+    print(str(Path(base) / "bin"))
+PY
+}
+
+platform_asset_regex() {
+  local ext_regex="$1"
+  local os arch os_regex arch_regex
+  os="$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  arch="$(uname -m 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+
+  case "${os}" in
+    darwin) os_regex="(darwin|macos)" ;;
+    linux) os_regex="linux" ;;
+    *) os_regex="${os}" ;;
+  esac
+
+  case "${arch}" in
+    arm64|aarch64) arch_regex="(arm64|aarch64)" ;;
+    x86_64|amd64) arch_regex="(x86_64|amd64)" ;;
+    *) arch_regex="${arch}" ;;
+  esac
+
+  printf "(?i)%s.*%s.*%s" "${os_regex}" "${arch_regex}" "${ext_regex}"
+}
 
 try_brew_install() {
   local formula="$1"
@@ -40,23 +91,32 @@ try_go_install() {
 
 try_pip_install() {
   local pkg="$1"
-  if has_cmd pip3; then
-    info "pip3 install ${pkg}"
-    if pip3 install "${pkg}"; then
-      ok "Installed ${pkg} via pip3"
-      return 0
-    fi
-    warn "pip3 install ${pkg} failed"
-  elif has_cmd python3; then
-    info "python3 -m pip install ${pkg}"
-    if python3 -m pip install "${pkg}"; then
-      ok "Installed ${pkg} via python3 -m pip"
-      return 0
-    fi
-    warn "python3 -m pip install ${pkg} failed"
+  local pip_cmd=()
+  local install_args=()
+
+  if has_cmd python3; then
+    pip_cmd=(python3 -m pip)
+  elif has_cmd pip3; then
+    pip_cmd=(pip3)
   else
     warn "pip3/python3 not found; cannot install ${pkg}"
+    return 1
   fi
+
+  if [ -n "${VIRTUAL_ENV:-}" ] || [ -n "${CONDA_PREFIX:-}" ]; then
+    install_args=(install --upgrade "${pkg}")
+  else
+    install_args=(install --user --upgrade "${pkg}")
+  fi
+
+  info "${pip_cmd[*]} ${install_args[*]}"
+  if "${pip_cmd[@]}" "${install_args[@]}"; then
+    PYTHON_USER_BIN="$(discover_python_user_bin)"
+    add_to_path "${PYTHON_USER_BIN}"
+    ok "Installed ${pkg} via ${pip_cmd[*]}"
+    return 0
+  fi
+  warn "${pip_cmd[*]} ${install_args[*]} failed"
   return 1
 }
 
@@ -200,8 +260,13 @@ ensure_or_install() {
 }
 
 info "Bootstrapping external security tools..."
+PYTHON_USER_BIN="$(discover_python_user_bin)"
 mkdir -p "${LOCAL_BIN}"
-export PATH="${LOCAL_BIN}:${PATH}"
+if [ -n "${PYTHON_USER_BIN}" ]; then
+  mkdir -p "${PYTHON_USER_BIN}"
+fi
+add_to_path "${LOCAL_BIN}"
+add_to_path "${PYTHON_USER_BIN}"
 
 # Core scan engines used by normal/deep scan chains
 if ! has_cmd ffuf; then
@@ -212,7 +277,7 @@ if ! has_cmd ffuf; then
   try_go_install "github.com/ffuf/ffuf/v2@latest" || true
 fi
 if ! has_cmd ffuf; then
-  try_github_binary_install "ffuf/ffuf" "ffuf" "(?i)(darwin|macos).*(arm64|aarch64).*(\\.tar\\.gz|\\.tgz)$" || true
+  try_github_binary_install "ffuf/ffuf" "ffuf" "$(platform_asset_regex '(\\.tar\\.gz|\\.tgz|\\.zip)$')" || true
 fi
 if has_cmd ffuf; then
   ok "ffuf installed ($(command -v ffuf))"
@@ -228,7 +293,7 @@ if ! has_cmd nuclei; then
   try_go_install "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest" || true
 fi
 if ! has_cmd nuclei; then
-  try_github_binary_install "projectdiscovery/nuclei" "nuclei" "(?i)(darwin|macos).*(arm64|aarch64).*\\.zip$" || true
+  try_github_binary_install "projectdiscovery/nuclei" "nuclei" "$(platform_asset_regex '(\\.zip|\\.tar\\.gz|\\.tgz)$')" || true
 fi
 if has_cmd nuclei; then
   ok "nuclei installed ($(command -v nuclei))"
@@ -292,3 +357,7 @@ info "Bootstrap complete. Verify with:"
 info "ffuf -h && nuclei -h && trufflehog --help && gitleaks --help && semgrep --help"
 info "If binaries were installed in ${LOCAL_BIN}, ensure your shell PATH includes it:"
 info "export PATH=\"${LOCAL_BIN}:\$PATH\""
+if [ -n "${PYTHON_USER_BIN}" ] && [ "${PYTHON_USER_BIN}" != "${LOCAL_BIN}" ]; then
+  info "If Python user-site scripts were used, include:"
+  info "export PATH=\"${PYTHON_USER_BIN}:\$PATH\""
+fi

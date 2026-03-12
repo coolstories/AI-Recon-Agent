@@ -4,10 +4,9 @@ import json
 from pathlib import Path
 
 from tools._cli_runner import (
-    build_missing_binary_error,
     create_artifact_dir,
     emit,
-    find_binary,
+    find_binary_or_auto_install,
     run_command,
     write_text,
 )
@@ -23,9 +22,14 @@ def run_gitleaks(
     if not target_path.exists():
         return f"ERROR: path not found: {target_path}"
 
-    binary_name, _ = find_binary(["gitleaks"])
+    binary_name, _, missing_error = find_binary_or_auto_install(
+        ["gitleaks"],
+        tool_name="GitLeaks",
+        stream_callback=stream_callback,
+        install_timeout=max(120, int(timeout)),
+    )
     if not binary_name:
-        return build_missing_binary_error(["gitleaks"], "GitLeaks")
+        return missing_error
 
     artifact_dir = create_artifact_dir("gitleaks", artifact_session)
     report_file = artifact_dir / "gitleaks_report.json"

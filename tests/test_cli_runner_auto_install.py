@@ -28,6 +28,12 @@ class CliRunnerAutoInstallTests(unittest.TestCase):
             self.assertEqual(name, "naabu")
             self.assertEqual(resolved, str(fake_bin))
 
+    def test_build_common_bin_dirs_includes_python_user_bin(self):
+        python_user_bin = Path("/tmp/python-user-bin")
+        with patch.object(cli_runner, "_python_user_bin_dirs", return_value=[python_user_bin]):
+            dirs = cli_runner._build_common_bin_dirs()
+        self.assertIn(python_user_bin, dirs)
+
     def test_find_binary_or_auto_install_success_path(self):
         install_result = {
             "ran": True,

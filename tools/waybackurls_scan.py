@@ -4,10 +4,9 @@ import json
 from urllib.parse import urlparse
 
 from tools._cli_runner import (
-    build_missing_binary_error,
     create_artifact_dir,
     emit,
-    find_binary,
+    find_binary_or_auto_install,
     run_command,
     write_text,
 )
@@ -33,9 +32,14 @@ def run_waybackurls(
     if not norm_target:
         return "ERROR: target is required"
 
-    binary_name, _ = find_binary(["waybackurls"])
+    binary_name, _, missing_error = find_binary_or_auto_install(
+        ["waybackurls"],
+        tool_name="Waybackurls",
+        stream_callback=stream_callback,
+        install_timeout=max(90, int(timeout)),
+    )
     if not binary_name:
-        return build_missing_binary_error(["waybackurls"], "Waybackurls")
+        return missing_error
 
     artifact_dir = create_artifact_dir("waybackurls", artifact_session)
     endpoints_file = artifact_dir / "endpoints.txt"
