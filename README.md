@@ -84,6 +84,18 @@ This includes raw output, JSON reports, logs, and visual assets when generated.
 - Optional core CLI tools: nmap, nikto, whois, dig
 - Optional advanced tools: trufflehog, gitleaks, aquatone, testssl.sh, naabu, waybackurls, arjun, wfuzz, semgrep, wpscan
 
+## Railway Deploy Notes
+
+- Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+- Required Railway variables:
+  - `OPENROUTER_API_KEY` (must be a valid OpenRouter key)
+  - `OPENROUTER_MODEL` (for example `openai/gpt-5.4`)
+- Optional variables:
+  - `TRUTH_VERIFICATION_POLICY`
+  - `SHODAN_API_KEY`, `WPSCAN_API_TOKEN`, etc.
+
+If logs show `401 User not found`, the `OPENROUTER_API_KEY` configured in Railway is invalid/revoked or belongs to a different provider.
+
 ## Disclaimer
 
 **Only scan websites you own or have explicit permission to test.** Unauthorized scanning is illegal in most jurisdictions.
