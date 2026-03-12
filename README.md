@@ -29,6 +29,7 @@ cp .env.example .env
 # Optional: set SHODAN_API_KEY as auth/quota fallback backend
 # Optional: add WPSCAN_API_TOKEN for WPScan vulnerability intelligence
 # Optional: set TRUTH_VERIFICATION_POLICY (strict|balanced|aggressive) for deep-scan verification gating
+# Optional: set ACCESS_PASSWORD (HTTP Basic Auth password for UI/API)
 
 # 4. Run
 python main.py
@@ -91,9 +92,13 @@ This includes raw output, JSON reports, logs, and visual assets when generated.
 - Required Railway variables:
   - `OPENROUTER_API_KEY` (must be a valid OpenRouter key)
   - `OPENROUTER_MODEL` (for example `openai/gpt-5.4`)
+  - `ACCESS_PASSWORD` (set to your desired password, e.g. `Recon103!`)
 - Optional variables:
   - `TRUTH_VERIFICATION_POLICY`
   - `SHODAN_API_KEY`, `WPSCAN_API_TOKEN`, etc.
+
+HTTP Basic Auth is enabled by default when `ACCESS_PASSWORD` is set.
+Use any username and the configured password.
 
 If logs show `401 User not found`, the `OPENROUTER_API_KEY` configured in Railway is invalid/revoked or belongs to a different provider.
 

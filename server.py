@@ -1,6 +1,8 @@
 import json
 import sys
 import os
+import base64
+import hmac
 import threading
 import uuid
 import time
@@ -21,7 +23,7 @@ for _bin_dir in (os.path.expanduser("~/.local/bin"), "/opt/homebrew/bin", "/usr/
         os.environ["PATH"] = f"{_bin_dir}:{os.environ.get('PATH', '')}"
 
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -92,6 +94,48 @@ from tools.target_reachability import resolve_web_target
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+def _extract_basic_auth_password(auth_header: str) -> str:
+    raw = str(auth_header or "").strip()
+    if not raw or not raw.lower().startswith("basic "):
+        return ""
+    token = raw.split(" ", 1)[1].strip()
+    if not token:
+        return ""
+    try:
+        decoded = base64.b64decode(token).decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+    if ":" not in decoded:
+        return ""
+    _, password = decoded.split(":", 1)
+    return password
+
+
+def _basic_auth_unauthorized() -> Response:
+    return Response(
+        status_code=401,
+        content="Unauthorized",
+        media_type="text/plain",
+        headers={"WWW-Authenticate": f'Basic realm="{ACCESS_AUTH_REALM}"'},
+    )
+
+
+@app.middleware("http")
+async def _access_password_guard(request: Request, call_next):
+    if not ACCESS_AUTH_ENABLED or not ACCESS_AUTH_PASSWORD:
+        return await call_next(request)
+
+    path = request.url.path or "/"
+    if path in ACCESS_AUTH_EXEMPT_PATHS:
+        return await call_next(request)
+
+    provided_password = _extract_basic_auth_password(request.headers.get("Authorization", ""))
+    if not provided_password or not hmac.compare_digest(str(provided_password), str(ACCESS_AUTH_PASSWORD)):
+        return _basic_auth_unauthorized()
+    return await call_next(request)
+
 
 ALL_TOOLS = [
     TERMINAL_TOOL, TOOL_DEFINITION_WEB, TOOL_DEFINITION_SSL, SEARCH_TOOL,
@@ -244,6 +288,11 @@ DEFAULT_VERIFICATION_POLICY = str(
 ).strip().lower()
 if DEFAULT_VERIFICATION_POLICY not in VALID_VERIFICATION_POLICIES:
     DEFAULT_VERIFICATION_POLICY = "balanced"
+
+ACCESS_AUTH_PASSWORD = str(os.getenv("ACCESS_PASSWORD", "Recon103!") or "Recon103!")
+ACCESS_AUTH_ENABLED = str(os.getenv("ACCESS_AUTH_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+ACCESS_AUTH_REALM = str(os.getenv("ACCESS_AUTH_REALM", "AI Recon Agent") or "AI Recon Agent")
+ACCESS_AUTH_EXEMPT_PATHS = {"/api/health"}
 
 DEFENSIVE_QUERY_HINTS = (
     "prevent", "mitigate", "defend", "fix", "patch", "harden", "secure",
