@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Recon Agent</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        dark: { 700: '#222240', 800: '#1a1a2e', 900: '#0f0f1a', 950: '#0a0a14' },
+                        accent: { 500: '#6366f1', 600: '#4f46e5', 400: '#818cf8' },
+                        cyber: { green: '#00ff88', blue: '#00d4ff', red: '#ff3366', yellow: '#ffcc00' }
+                    }
+                }
+            }
+        }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body class="bg-dark-950 text-gray-200 min-h-screen font-sans overflow-hidden">
+    <div id="app" class="flex h-screen">
+
+        <!-- Sidebar -->
+        <aside id="sidebar" class="sidebar">
+            <div class="sidebar-header">
+                <div class="flex items-center gap-2">
+                    <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-accent-500 to-cyber-blue flex items-center justify-center flex-shrink-0">
+                        <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+                        </svg>
+                    </div>
+                    <span class="text-sm font-semibold text-gray-200">AI Recon Agent</span>
+                </div>
+                <button id="newChatBtn" class="new-chat-btn" title="New Chat">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+                    </svg>
+                </button>
+            </div>
+            <div id="chatList" class="chat-list"></div>
+        </aside>
+
+        <!-- Main content -->
+        <main class="main-content">
+
+            <!-- Empty state (no chat selected) -->
+            <div id="emptyState" class="empty-state">
+                <div class="empty-inner">
+                    <div class="inline-flex items-center justify-center rounded-2xl bg-gradient-to-br from-accent-500/20 to-cyber-blue/20 border border-accent-500/20 mb-5" style="width:4rem;height:4rem">
+                        <svg style="width:2rem;height:2rem" class="text-accent-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+                        </svg>
+                    </div>
+                    <h2 class="empty-title font-semibold text-gray-300 mb-3">AI Recon Agent</h2>
+                    <p class="empty-subtitle text-gray-500 mb-6">
+                        Advanced security research and OSINT platform powered by AI. Ask questions about security findings, 
+                        request vulnerability scans, discover surveillance cameras, analyze web applications, enumerate cloud infrastructure, 
+                        test for GraphQL/API vulnerabilities, detect cache poisoning, identify OAuth flaws, and perform comprehensive penetration testing. 
+                        Supports 46 specialized tools including subdomain enumeration, port scanning, exploit automation, WAF fingerprinting, 
+                        HTTP request smuggling detection, race condition testing, and supply chain analysis.
+                    </p>
+                    <form id="inputFormEmpty" class="empty-form mx-auto">
+                        <div class="relative">
+                            <input id="taskInputEmpty" type="text"
+                                placeholder="e.g. What does this finding mean? or Scan https://example.com"
+                                class="empty-input w-full bg-dark-800 border border-gray-700/50 rounded-2xl px-6 py-4 pr-40 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-accent-500/50 focus:ring-2 focus:ring-accent-500/20 transition-all text-base"
+                                autocomplete="off">
+                            <div class="empty-action-buttons absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                                <button type="submit" data-mode="deep" class="bg-gradient-to-r from-cyber-red to-orange-500 hover:from-orange-500 hover:to-cyber-red text-white font-medium px-4 py-2.5 rounded-xl transition-all text-sm">Deep</button>
+                            </div>
+                        </div>
+                        <div class="empty-chip-row flex gap-2 mt-3 flex-wrap justify-center">
+                            <button type="button" onclick="startChat('Deep scan https://example.com and gather tool-backed exploit evidence', 'deep')" class="example-chip">Deep Scan Website</button>
+                            <button type="button" onclick="startChat('Deep scan https://staging.example.com and verify only exploit-proven critical findings', 'deep')" class="example-chip">Deep Scan Staging</button>
+                            <button type="button" onclick="startChat('Find CCTV cameras near Shibuya, Tokyo', 'auto')" class="example-chip">Find CCTV Cameras</button>
+                            <button type="button" onclick="startChat('I am in Menlo Park. Find all surveillance cameras and live feeds around me.', 'auto')" class="example-chip">Live Camera Feeds</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Active chat view -->
+            <div id="chatView" class="chat-view hidden">
+                <!-- Chat header -->
+                <div id="chatHeader" class="chat-header">
+                    <div class="flex items-center gap-3 flex-1 min-w-0">
+                        <div id="chatStatusDot" class="w-2.5 h-2.5 rounded-full bg-cyber-green animate-pulse flex-shrink-0"></div>
+                        <span id="chatTitle" class="text-sm font-medium text-gray-300 truncate"></span>
+                    </div>
+                    <span id="chatActivityBadge" class="activity-badge idle flex-shrink-0">Idle</span>
+                    <button id="stopChatBtn" type="button" class="stop-chat-btn hidden flex-shrink-0" title="Stop current prompt">Stop</button>
+                    <span id="chatStepBadge" class="text-xs font-mono bg-dark-900 text-gray-500 px-2 py-1 rounded-lg flex-shrink-0">Step 0/30</span>
+                </div>
+
+                <!-- Scrollable output -->
+                <div id="chatOutput" class="chat-output">
+                    <div id="outputArea" class="space-y-3 pb-6 px-4"></div>
+
+                    <!-- Final Report -->
+                    <div id="finalReport" class="hidden px-4 pb-6">
+                        <div class="bg-dark-800 border border-accent-500/30 rounded-2xl overflow-hidden">
+                            <div class="bg-gradient-to-r from-accent-500/10 to-cyber-blue/10 border-b border-accent-500/20 px-6 py-3 flex items-center gap-2">
+                                <svg class="w-5 h-5 text-accent-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                                </svg>
+                                <span class="font-semibold text-accent-400">Final Report</span>
+                                <div class="ml-auto flex items-center gap-2">
+                                    <span id="truthBadge" class="truth-badge hidden"></span>
+                                    <button id="verifyTruthBtn" class="truth-btn hidden" onclick="runFinalTruthCheck()">Find Final Truth</button>
+                                </div>
+                            </div>
+                            <div id="reportContent" class="px-6 py-5 prose prose-invert max-w-none report-content"></div>
+                            <div id="truthPanel" class="truth-panel hidden">
+                                <div class="truth-panel-header">Final Truth Verification</div>
+                                <div id="truthContent" class="px-6 py-5 prose prose-invert max-w-none report-content"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Bottom input bar for new chats while viewing -->
+                <div class="chat-input-bar">
+                    <form id="inputFormChat" class="relative max-w-3xl mx-auto w-full">
+                        <input id="taskInputChat" type="text"
+                            placeholder="Ask a question or start another scan..."
+                            class="w-full bg-dark-800 border border-gray-700/50 rounded-xl px-4 py-3 pr-44 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-accent-500/50 focus:ring-2 focus:ring-accent-500/20 transition-all text-sm"
+                            autocomplete="off">
+                        <div class="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
+                            <button id="openAskModalBtn" type="button" class="bg-dark-700 hover:bg-dark-600 text-gray-100 font-medium px-3 py-2 rounded-lg border border-gray-600/70 transition-all text-xs">Ask</button>
+                            <button type="submit" data-mode="deep" class="bg-gradient-to-r from-cyber-red to-orange-500 hover:from-orange-500 hover:to-cyber-red text-white font-medium px-3 py-2 rounded-lg transition-all text-xs">Deep</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Notification sound -->
+    <audio id="notifSound" preload="auto">
+        <source src="data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdH2LkZqTi3lyam11foWMkZSQi4R9dnFtamhmaGptcXd9g4mNkJKSkI2JhYF9eXV0c3N0dXd5fICDhomLjI2NjIuJh4WDgX9+fXx8fH1+f4GChIWGh4iIiIiHhoWEg4KBgICAf4CBgoKDhIWFhoaGhoaFhYSEg4OCgoGBgYGBgYKCg4OEhISEhISEhIODg4KCgoKBgYKCgoKCg4ODg4ODg4ODgoKCgoKCgoKCgoKCgoKCgoKCg4ODg4ODg4ODgoKC" type="audio/wav">
+    </audio>
+
+    <!-- Toast notification container -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <!-- Ask Modal -->
+    <div id="askModal" class="ask-modal hidden" aria-hidden="true">
+        <div class="ask-modal-backdrop" data-close-ask-modal="1"></div>
+        <div class="ask-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="askModalTitle">
+            <div class="ask-modal-header">
+                <div>
+                    <h3 id="askModalTitle" class="ask-modal-title">Ask Follow-up</h3>
+                    <p class="ask-modal-subtitle">Ask questions and steer the answer with quick actions.</p>
+                </div>
+                <button id="closeAskModalBtn" type="button" class="ask-modal-close" aria-label="Close ask modal">&times;</button>
+            </div>
+            <div id="askModalHistory" class="ask-modal-history"></div>
+            <div id="askModalError" class="ask-modal-error hidden"></div>
+            <form id="askModalForm" class="ask-modal-form">
+                <input id="askModalInput" type="text" autocomplete="off"
+                    placeholder="Ask a follow-up about this chat..." class="ask-modal-input">
+                <button id="askModalSendBtn" type="submit" class="ask-modal-send">Ask</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="/app.js"></script>
+</body>
+</html>
