@@ -32,8 +32,7 @@ INSTALL_HINTS = {
 }
 
 AUTO_INSTALL_LOCK = threading.Lock()
-AUTO_INSTALL_LAST_ATTEMPT_TS = 0.0
-AUTO_INSTALL_LAST_SUMMARY = "not_attempted"
+AUTO_INSTALL_STATE_BY_TOOL: dict[str, dict[str, str | float]] = {}
 AUTO_INSTALL_COOLDOWN_SEC = 300
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -214,10 +213,8 @@ def find_binary_or_auto_install(
     stream_callback=None,
     install_timeout: int = 900,
 ):
-    global AUTO_INSTALL_LAST_ATTEMPT_TS
-    global AUTO_INSTALL_LAST_SUMMARY
-
     cands = list(candidates)
+    tool_key = str((tool_name or (cands[0] if cands else "unknown"))).strip().lower() or "unknown"
     binary_name, binary_path = find_binary(cands)
     if binary_name:
         return binary_name, binary_path, ""
@@ -227,29 +224,34 @@ def find_binary_or_auto_install(
 
     now = time.time()
     install_result = None
+    state_snapshot = None
     with AUTO_INSTALL_LOCK:
         binary_name, binary_path = find_binary(cands)
         if binary_name:
             return binary_name, binary_path, ""
 
-        age_sec = now - float(AUTO_INSTALL_LAST_ATTEMPT_TS or 0.0)
-        if AUTO_INSTALL_LAST_ATTEMPT_TS and age_sec < AUTO_INSTALL_COOLDOWN_SEC:
+        current_state = dict(AUTO_INSTALL_STATE_BY_TOOL.get(tool_key, {}) or {})
+        last_attempt_ts = float(current_state.get("last_attempt_ts", 0.0) or 0.0)
+        age_sec = now - last_attempt_ts
+        if last_attempt_ts and age_sec < AUTO_INSTALL_COOLDOWN_SEC:
             emit(stream_callback, "tool_info", {
                 "message": (
-                    f"Auto-install recently attempted ({int(age_sec)}s ago). "
+                    f"Auto-install for {tool_key} recently attempted ({int(age_sec)}s ago). "
                     "Skipping reinstall cooldown and re-checking binary paths."
                 ),
             })
         else:
             install_result = _run_tool_installer(timeout=max(60, int(install_timeout)), stream_callback=stream_callback)
-            AUTO_INSTALL_LAST_ATTEMPT_TS = time.time()
+            current_state["last_attempt_ts"] = time.time()
             if install_result.get("ran"):
-                AUTO_INSTALL_LAST_SUMMARY = (
+                current_state["last_summary"] = (
                     f"exit={install_result.get('exit_code')} timed_out={install_result.get('timed_out')} "
                     f"elapsed={install_result.get('elapsed')}s"
                 )
             else:
-                AUTO_INSTALL_LAST_SUMMARY = str(install_result.get("stderr") or "installer_not_run")
+                current_state["last_summary"] = str(install_result.get("stderr") or "installer_not_run")
+            AUTO_INSTALL_STATE_BY_TOOL[tool_key] = current_state
+        state_snapshot = dict(current_state)
 
     binary_name, binary_path = find_binary(cands)
     if binary_name:
@@ -269,7 +271,8 @@ def find_binary_or_auto_install(
             extra.append(f"AUTO_INSTALL_STDERR_TAIL:\n{tail_err}")
         return None, None, base + "\n" + "\n".join(extra)
 
-    return None, None, base + f"\nAUTO_INSTALL_LAST: {AUTO_INSTALL_LAST_SUMMARY}"
+    last_summary = str((state_snapshot or {}).get("last_summary", "not_attempted"))
+    return None, None, base + f"\nAUTO_INSTALL_LAST({tool_key}): {last_summary}"
 
 
 def sanitize_session_id(value: str | None):

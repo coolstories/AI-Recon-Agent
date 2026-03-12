@@ -262,7 +262,7 @@ def run_ffuf(target_url: str, mode: str = "dir", wordlist: str = "common",
         emit(stream_callback, "coverage_degraded", {
             "tool": "run_ffuf",
             "code": "BIN_MISSING",
-            "message": "ffuf unavailable after auto-install attempt.",
+            "message": "ffuf unavailable; fallback executed.",
             "fallback": "wfuzz -> internal-http-path-probe",
         })
         wfuzz_output = ""

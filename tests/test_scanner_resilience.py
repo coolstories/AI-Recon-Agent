@@ -51,6 +51,8 @@ class WrapperBinaryResolutionTests(unittest.TestCase):
         self.assertIn("COVERAGE DOWNGRADE", out)
         self.assertIn("ERROR: missing testssl", out)
         self.assertIn("TLS_FALLBACK_OK", out)
+        self.assertIn("unavailable", out.lower())
+        self.assertIn("fallback", out.lower())
 
     def test_nuclei_missing_binary_runs_both_fallbacks(self):
         with patch(
@@ -64,6 +66,7 @@ class WrapperBinaryResolutionTests(unittest.TestCase):
         self.assertIn("ERROR: missing nuclei", out)
         self.assertIn("TLS_SCAN_FALLBACK", out)
         self.assertIn("EXPOSED_PATHS_FALLBACK", out)
+        self.assertIn("fallback checks executed", out.lower())
 
     def test_naabu_missing_binary_uses_internal_port_scan_fallback(self):
         with patch(
@@ -278,6 +281,55 @@ class CliRunnerPathDiscoveryTests(unittest.TestCase):
         ):
             dirs = _cli_runner._build_common_bin_dirs()
         self.assertIn(gem_bin, dirs)
+
+    def test_find_binary_auto_install_cooldown_is_per_tool(self):
+        _cli_runner.AUTO_INSTALL_STATE_BY_TOOL.clear()
+
+        call_count = {"n": 0}
+
+        def fake_installer(*args, **kwargs):
+            call_count["n"] += 1
+            return {
+                "ran": True,
+                "timed_out": False,
+                "elapsed": 1.0,
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": "simulated failure",
+            }
+
+        with patch("tools._cli_runner.find_binary", return_value=(None, None)), patch(
+            "tools._cli_runner._run_tool_installer", side_effect=fake_installer
+        ):
+            _cli_runner.find_binary_or_auto_install(["nuclei"], tool_name="Nuclei")
+            _cli_runner.find_binary_or_auto_install(["testssl.sh", "testssl"], tool_name="testssl.sh")
+
+        self.assertEqual(call_count["n"], 2)
+
+    def test_find_binary_auto_install_cooldown_applies_to_same_tool(self):
+        _cli_runner.AUTO_INSTALL_STATE_BY_TOOL.clear()
+
+        call_count = {"n": 0}
+
+        def fake_installer(*args, **kwargs):
+            call_count["n"] += 1
+            return {
+                "ran": True,
+                "timed_out": False,
+                "elapsed": 1.0,
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": "simulated failure",
+            }
+
+        with patch("tools._cli_runner.find_binary", return_value=(None, None)), patch(
+            "tools._cli_runner._run_tool_installer", side_effect=fake_installer
+        ):
+            _cli_runner.find_binary_or_auto_install(["nuclei"], tool_name="Nuclei")
+            _, _, err = _cli_runner.find_binary_or_auto_install(["nuclei"], tool_name="Nuclei")
+
+        self.assertEqual(call_count["n"], 1)
+        self.assertIn("AUTO_INSTALL_LAST(nuclei)", err)
 
 
 if __name__ == "__main__":

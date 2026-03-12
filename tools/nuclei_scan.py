@@ -34,7 +34,7 @@ def run_nuclei(target: str, templates: str = "auto", severity: str = "critical,h
             stream_callback("coverage_degraded", {
                 "tool": "run_nuclei",
                 "code": "BIN_MISSING",
-                "message": "nuclei unavailable after auto-install attempt.",
+                "message": "nuclei unavailable; fallback executed.",
                 "fallback": "testssl + exposed paths",
             })
             stream_callback("tool_info", {

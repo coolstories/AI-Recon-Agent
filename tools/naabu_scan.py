@@ -60,7 +60,7 @@ def run_naabu(
         emit(stream_callback, "coverage_degraded", {
             "tool": "run_naabu",
             "code": "BIN_MISSING",
-            "message": "Naabu unavailable after auto-install attempt.",
+            "message": "Naabu unavailable; fallback executed.",
             "fallback": "internal-port-scan",
         })
         fallback = port_scan(

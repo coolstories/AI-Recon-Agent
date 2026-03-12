@@ -73,7 +73,7 @@ def run_testssl(
         emit(stream_callback, "coverage_degraded", {
             "tool": "run_testssl",
             "code": "BIN_MISSING",
-            "message": "testssl.sh unavailable after auto-install attempt.",
+            "message": "testssl.sh unavailable; fallback executed.",
             "fallback": "python-ssl-cert-probe",
         })
         fallback = _python_tls_fallback(norm_target)

@@ -245,7 +245,7 @@ def run_wpscan(
         emit(stream_callback, "coverage_degraded", {
             "tool": "run_wpscan",
             "code": "BIN_MISSING",
-            "message": "WPScan unavailable after auto-install attempt.",
+            "message": "WPScan unavailable; fallback executed.",
             "fallback": "cms_scan + check_exposed_paths",
         })
         fallback = _wpscan_fallback_assessment(normalized, stream_callback=stream_callback)
