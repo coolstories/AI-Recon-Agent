@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tools import aquatone_scan
+from tools import _cli_runner
 from tools import arjun_scan
 from tools import dns_recon
 from tools import ffuf_scan
@@ -267,6 +268,16 @@ class ThreadExhaustionFallbackTests(unittest.TestCase):
         self.assertIn("PORT SCAN RESULTS", out)
         self.assertIn("PORT 80/tcp", out)
         self.assertTrue(any("thread limit reached" in msg.lower() for msg in events))
+
+
+class CliRunnerPathDiscoveryTests(unittest.TestCase):
+    def test_build_common_bin_dirs_includes_ruby_gem_user_bin(self):
+        gem_bin = Path("/tmp/fake-gem-bin")
+        with patch("tools._cli_runner._python_user_bin_dirs", return_value=[]), patch(
+            "tools._cli_runner._ruby_gem_user_bin_dirs", return_value=[gem_bin]
+        ):
+            dirs = _cli_runner._build_common_bin_dirs()
+        self.assertIn(gem_bin, dirs)
 
 
 if __name__ == "__main__":

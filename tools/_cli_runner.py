@@ -68,6 +68,42 @@ def _python_user_bin_dirs():
     return out
 
 
+def _ruby_gem_user_bin_dirs():
+    candidates = []
+
+    ruby_path = shutil.which("ruby")
+    if ruby_path:
+        try:
+            result = subprocess.run(
+                [ruby_path, "-rrubygems", "-e", "puts Gem.user_dir + '/bin'"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            gem_bin = str(result.stdout or "").strip()
+            if gem_bin:
+                candidates.append(Path(gem_bin))
+        except Exception:
+            pass
+
+    # Fallback for common gem user paths when ruby introspection is unavailable.
+    try:
+        for path in Path.home().glob(".local/share/gem/ruby/*/bin"):
+            candidates.append(path)
+    except Exception:
+        pass
+
+    out = []
+    seen = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(candidate)
+    return out
+
+
 def _build_common_bin_dirs():
     defaults = [
         Path.home() / ".local" / "bin",
@@ -77,7 +113,7 @@ def _build_common_bin_dirs():
     ]
     out = []
     seen = set()
-    for candidate in [*defaults, *_python_user_bin_dirs()]:
+    for candidate in [*defaults, *_python_user_bin_dirs(), *_ruby_gem_user_bin_dirs()]:
         key = str(candidate)
         if key in seen:
             continue
