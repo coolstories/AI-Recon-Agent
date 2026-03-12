@@ -86,7 +86,8 @@ This includes raw output, JSON reports, logs, and visual assets when generated.
 
 ## Railway Deploy Notes
 
-- Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+- Start command (safe): `python -c "import os,uvicorn; uvicorn.run('main:app', host='0.0.0.0', port=int(os.getenv('PORT','8000')))"`  
+  (A `Procfile` is included with this command.)
 - Required Railway variables:
   - `OPENROUTER_API_KEY` (must be a valid OpenRouter key)
   - `OPENROUTER_MODEL` (for example `openai/gpt-5.4`)
@@ -95,6 +96,8 @@ This includes raw output, JSON reports, logs, and visual assets when generated.
   - `SHODAN_API_KEY`, `WPSCAN_API_TOKEN`, etc.
 
 If logs show `401 User not found`, the `OPENROUTER_API_KEY` configured in Railway is invalid/revoked or belongs to a different provider.
+
+Important: put the command above in **Start Command**, not **Build Command**.
 
 ## Disclaimer
 

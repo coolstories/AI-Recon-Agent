@@ -514,6 +514,26 @@ def _build_policy_block_report(query: str, safety: dict, mode: str = "auto") -> 
     return "\n".join(lines)
 
 
+def _friendly_runtime_error_message(exc: Exception) -> str:
+    raw = str(exc or "")
+    low = raw.lower()
+    if "401" in low and "user not found" in low:
+        return (
+            "LLM provider authentication failed (401: User not found). "
+            "Set a valid `OPENROUTER_API_KEY` in Railway environment variables and redeploy. "
+            "This app is configured for OpenRouter (`https://openrouter.ai/api/v1`), so an OpenAI key will not work."
+        )
+    if "openrouter_api_key not set" in low:
+        return (
+            "Missing required environment variable `OPENROUTER_API_KEY`. "
+            "Set it in Railway variables and redeploy."
+        )
+    return (
+        "Uncaught worker exception; forcing session shutdown. "
+        f"Details: {raw}"
+    )
+
+
 def _normalize_web_target(target: str) -> str:
     raw = (target or "").strip()
     if not raw:
@@ -2707,10 +2727,7 @@ def run_agent_worker(
 
     except Exception as fatal_exc:
         emit("error", {
-            "message": (
-                "Uncaught worker exception; forcing session shutdown. "
-                f"Details: {str(fatal_exc)}"
-            )
+            "message": _friendly_runtime_error_message(fatal_exc)
         })
     finally:
         with sessions_lock:
