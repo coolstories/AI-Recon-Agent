@@ -9,6 +9,7 @@ from tools import aquatone_scan
 from tools import arjun_scan
 from tools import ffuf_scan
 from tools import gitleaks_scan
+from tools import naabu_scan
 from tools import nuclei_scan
 from tools import semgrep_scan
 from tools import testssl_scan
@@ -16,6 +17,7 @@ from tools import trufflehog_scan
 from tools import waybackurls_scan
 from tools import web_request
 from tools import wfuzz_scan
+from tools import wpscan_scan
 
 
 class WrapperBinaryResolutionTests(unittest.TestCase):
@@ -58,6 +60,49 @@ class WrapperBinaryResolutionTests(unittest.TestCase):
         self.assertIn("ERROR: missing nuclei", out)
         self.assertIn("TLS_SCAN_FALLBACK", out)
         self.assertIn("EXPOSED_PATHS_FALLBACK", out)
+
+    def test_naabu_missing_binary_uses_internal_port_scan_fallback(self):
+        with patch(
+            "tools.naabu_scan.find_binary_or_auto_install",
+            return_value=(None, None, "ERROR: missing naabu"),
+        ), patch("tools.naabu_scan.port_scan", return_value="PORT_SCAN_FALLBACK_OK"):
+            out = naabu_scan.run_naabu("https://example.com", timeout=20)
+        self.assertIn("COVERAGE DOWNGRADE", out)
+        self.assertIn("ERROR: missing naabu", out)
+        self.assertIn("PORT_SCAN_FALLBACK_OK", out)
+
+    def test_wpscan_missing_binary_runs_wordpress_fallback_assessment(self):
+        with patch(
+            "tools.wpscan_scan.find_binary_or_auto_install",
+            return_value=(None, None, "ERROR: missing wpscan"),
+        ), patch(
+            "tools.wpscan_scan._wpscan_fallback_assessment",
+            return_value="WPSCAN_FALLBACK_OK",
+        ):
+            out = wpscan_scan.run_wpscan("https://example.com", timeout=20)
+        self.assertIn("COVERAGE DOWNGRADE", out)
+        self.assertIn("ERROR: missing wpscan", out)
+        self.assertIn("WPSCAN_FALLBACK_OK", out)
+
+    def test_wpscan_exec_failure_without_report_runs_fallback(self):
+        fake_result = {
+            "stdout": "",
+            "stderr": "runtime error",
+            "exit_code": 1,
+            "timed_out": False,
+            "elapsed": 0.4,
+            "command": "wpscan ...",
+        }
+        with patch(
+            "tools.wpscan_scan.find_binary_or_auto_install",
+            return_value=("wpscan", "/tmp/wpscan", ""),
+        ), patch("tools.wpscan_scan.run_command", return_value=fake_result), patch(
+            "tools.wpscan_scan._wpscan_fallback_assessment",
+            return_value="WPSCAN_EXEC_FALLBACK_OK",
+        ):
+            out = wpscan_scan.run_wpscan("https://example.com", timeout=20)
+        self.assertIn("COVERAGE DOWNGRADE", out)
+        self.assertIn("WPSCAN_EXEC_FALLBACK_OK", out)
 
 
 class FfufFallbackAndIsolationTests(unittest.TestCase):

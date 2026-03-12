@@ -3363,22 +3363,46 @@ async def stream_chat(session_id: str):
     """SSE stream for a running chat. Sends all past events then streams new ones."""
     def generate():
         cursor = 0
+        heartbeat_interval_sec = 15.0
+        last_heartbeat = time.time()
         while True:
+            source_events = []
+            status = "done"
             with sessions_lock:
                 s = sessions.get(session_id)
-                if not s:
-                    # Session not in memory — may be finished on disk
+                if s:
+                    source_events = list(s.get("events", []))
+                    status = s.get("status", "done")
+
+            if not source_events:
+                # Session may have been recovered/persisted out of memory.
+                disk_data = load_session(session_id)
+                if not disk_data:
+                    # End stream gracefully when no session data is available.
+                    yield sse_event("done", {})
                     break
-                events = s["events"][cursor:]
-                status = s["status"]
+                source_events = list(disk_data.get("events", []))
+                status = disk_data.get("status", "done")
+
+            events = source_events[cursor:]
 
             for ev in events:
                 yield sse_event(ev["type"], {k: v for k, v in ev.items() if k != "type"})
                 cursor += 1
+                last_heartbeat = time.time()
 
             if status == "done":
+                if not source_events or source_events[-1].get("type") != "done" or cursor >= len(source_events):
+                    # Ensure clients always receive a terminal event.
+                    yield sse_event("done", {})
                 break
-            time.sleep(0.1)
+
+            now = time.time()
+            if (now - last_heartbeat) >= heartbeat_interval_sec:
+                # Keep intermediaries and browsers from dropping idle SSE connections.
+                yield ": keepalive\n\n"
+                last_heartbeat = now
+            time.sleep(0.15)
 
     return StreamingResponse(
         generate(),

@@ -8,6 +8,8 @@ info() { printf "[INFO] %s\n" "$1"; }
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 LOCAL_BIN="${HOME}/.local/bin"
 PYTHON_USER_BIN=""
+GO_DEFAULT_BIN="${HOME}/go/bin"
+GEM_USER_BIN=""
 
 add_to_path() {
   local dir="$1"
@@ -36,6 +38,13 @@ except Exception:
 if base:
     print(str(Path(base) / "bin"))
 PY
+}
+
+discover_gem_user_bin() {
+  if ! has_cmd ruby; then
+    return 0
+  fi
+  ruby -rrubygems -e 'puts Gem.user_dir + "/bin"' 2>/dev/null || true
 }
 
 platform_asset_regex() {
@@ -77,8 +86,12 @@ try_brew_install() {
 try_go_install() {
   local pkg="$1"
   if has_cmd go; then
-    info "go install ${pkg}"
-    if go install "${pkg}"; then
+    local gobin="${GOBIN:-${LOCAL_BIN}}"
+    mkdir -p "${gobin}"
+    add_to_path "${gobin}"
+    add_to_path "${GO_DEFAULT_BIN}"
+    info "GOBIN=${gobin} go install ${pkg}"
+    if GOBIN="${gobin}" go install "${pkg}"; then
       ok "Installed ${pkg} via go install"
       return 0
     fi
@@ -123,12 +136,20 @@ try_pip_install() {
 try_gem_install() {
   local pkg="$1"
   if has_cmd gem; then
-    info "gem install ${pkg}"
-    if gem install "${pkg}"; then
+    local gem_args=()
+    if [ -n "${GEM_HOME:-}" ] || [ -n "${BUNDLE_PATH:-}" ]; then
+      gem_args=("install" "${pkg}")
+    else
+      gem_args=("install" "--user-install" "${pkg}")
+    fi
+    info "gem ${gem_args[*]}"
+    if gem "${gem_args[@]}"; then
+      GEM_USER_BIN="$(discover_gem_user_bin)"
+      add_to_path "${GEM_USER_BIN}"
       ok "Installed ${pkg} via gem"
       return 0
     fi
-    warn "gem install ${pkg} failed"
+    warn "gem ${gem_args[*]} failed"
   else
     warn "gem not found; cannot install ${pkg}"
   fi
@@ -261,12 +282,19 @@ ensure_or_install() {
 
 info "Bootstrapping external security tools..."
 PYTHON_USER_BIN="$(discover_python_user_bin)"
+GEM_USER_BIN="$(discover_gem_user_bin)"
 mkdir -p "${LOCAL_BIN}"
+mkdir -p "${GO_DEFAULT_BIN}"
 if [ -n "${PYTHON_USER_BIN}" ]; then
   mkdir -p "${PYTHON_USER_BIN}"
 fi
+if [ -n "${GEM_USER_BIN}" ]; then
+  mkdir -p "${GEM_USER_BIN}"
+fi
 add_to_path "${LOCAL_BIN}"
+add_to_path "${GO_DEFAULT_BIN}"
 add_to_path "${PYTHON_USER_BIN}"
+add_to_path "${GEM_USER_BIN}"
 
 # Core scan engines used by normal/deep scan chains
 if ! has_cmd ffuf; then
@@ -308,9 +336,22 @@ ensure_or_install "semgrep" "Semgrep" try_pip_install "semgrep"
 
 # Recon/fuzzing tools
 ensure_or_install "naabu" "Naabu" try_go_install "github.com/projectdiscovery/naabu/v2/cmd/naabu@latest"
+if ! has_cmd naabu; then
+  try_github_binary_install "projectdiscovery/naabu" "naabu" "$(platform_asset_regex '(\\.zip|\\.tar\\.gz|\\.tgz)$')" || true
+fi
+if has_cmd naabu; then
+  ok "Naabu installed ($(command -v naabu))"
+else
+  warn "Naabu still missing"
+fi
 ensure_or_install "waybackurls" "Waybackurls" try_go_install "github.com/tomnomnom/waybackurls@latest"
 ensure_or_install "arjun" "Arjun" try_pip_install "arjun"
-ensure_or_install "wfuzz" "Wfuzz" try_pip_install "wfuzz"
+if has_cmd curl-config; then
+  ensure_or_install "wfuzz" "Wfuzz" try_pip_install "wfuzz"
+else
+  warn "Skipping Wfuzz install: curl-config not found (required for pycurl build)."
+  info "Install curl-config (libcurl dev package) then rerun installer, or install wfuzz in an environment with pycurl wheels."
+fi
 if has_cmd wpscan; then
   ok "WPScan already installed ($(command -v wpscan))"
 else
@@ -322,6 +363,15 @@ else
 fi
 if ! has_cmd wpscan; then
   try_gem_install "wpscan" || true
+fi
+if ! has_cmd wpscan && has_cmd docker; then
+  cat > "${LOCAL_BIN}/wpscan" <<'SH'
+#!/usr/bin/env bash
+set -e
+exec docker run --rm -i wpscanteam/wpscan "$@"
+SH
+  chmod +x "${LOCAL_BIN}/wpscan" || true
+  add_to_path "${LOCAL_BIN}"
 fi
 if has_cmd wpscan; then
   ok "WPScan installed ($(command -v wpscan))"

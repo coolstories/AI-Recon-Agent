@@ -6,6 +6,7 @@ let askModalState = { open: false, chatId: null, loading: false };
 let chatActivity = {};   // id -> { detail, lastEventAt, lastType, state }
 let activityTicker = null;
 let stallWatchState = {}; // id -> { inFlight, lastTriggeredAt, paused, timeoutStreak, lastStatusRequestText, lastStatusResultText }
+let streamRecoveryState = {}; // id -> { attempts, timerId, lastErrorAt }
 
 const STALL_CHECK_THRESHOLD_SEC = 200;
 const STALL_CHECK_COOLDOWN_SEC = 200;
@@ -47,6 +48,84 @@ function createInitialStallWatchState() {
         lastStatusRequestText: '',
         lastStatusResultText: '',
     };
+}
+
+function getStreamRecoveryState(chatId) {
+    if (!streamRecoveryState[chatId]) {
+        streamRecoveryState[chatId] = {
+            attempts: 0,
+            timerId: null,
+            lastErrorAt: 0,
+        };
+    }
+    return streamRecoveryState[chatId];
+}
+
+function clearStreamRecovery(chatId) {
+    const state = getStreamRecoveryState(chatId);
+    if (state.timerId) {
+        clearTimeout(state.timerId);
+        state.timerId = null;
+    }
+    state.attempts = 0;
+    state.lastErrorAt = 0;
+}
+
+async function refreshChatFromServer(chatId) {
+    try {
+        const latest = await apiGetChat(chatId);
+        if (latest && !latest.error) {
+            chats[chatId] = { ...chats[chatId], ...latest };
+            return latest;
+        }
+    } catch (err) {}
+    return null;
+}
+
+function scheduleStreamRecovery(chatId, reason = '') {
+    const chat = chats[chatId];
+    if (!chat || chat.status !== 'running') return;
+
+    const state = getStreamRecoveryState(chatId);
+    if (state.timerId) return;
+
+    state.attempts += 1;
+    state.lastErrorAt = Date.now();
+    const delayMs = Math.min(12000, 1200 * Math.pow(2, Math.min(state.attempts - 1, 4)));
+
+    state.timerId = setTimeout(async () => {
+        state.timerId = null;
+        const current = chats[chatId];
+        if (!current || current.status !== 'running') return;
+
+        const latest = await refreshChatFromServer(chatId);
+        if (latest && latest.status && latest.status !== 'running') {
+            if (current._evtSource) {
+                current._evtSource.close();
+                current._evtSource = null;
+            }
+            current.status = latest.status;
+            if (activeChatId === chatId) {
+                renderChatFull(chatId);
+            } else {
+                renderChatList();
+            }
+            renderActiveChatActivity();
+            updateStopChatButton();
+            clearStreamRecovery(chatId);
+            return;
+        }
+
+        const src = current._evtSource;
+        const shouldRestart = !src || src.readyState === EventSource.CLOSED;
+        if (shouldRestart) {
+            if (src) src.close();
+            streamChat(chatId);
+            return;
+        }
+
+        scheduleStreamRecovery(chatId, reason);
+    }, delayMs);
 }
 
 function inferActivityFromEvent(type, data = {}) {
@@ -254,6 +333,7 @@ async function startChat(query, mode = 'auto') {
     };
     chatRenderState[data.id] = { thinkingEl: null, toolCard: null, toolArgsBuffer: {} };
     stallWatchState[data.id] = createInitialStallWatchState();
+    clearStreamRecovery(data.id);
     renderChatList();
     selectChat(data.id);
     streamChat(data.id);
@@ -368,10 +448,32 @@ function runStallWatchdog() {
 }
 
 function streamChat(chatId) {
+    const existing = chats[chatId]?._evtSource;
+    if (existing && existing.readyState !== EventSource.CLOSED) {
+        existing.close();
+    }
+
     const evtSource = new EventSource(`/api/chats/${chatId}/stream`);
     if (chats[chatId]) chats[chatId]._evtSource = evtSource;
+    clearStreamRecovery(chatId);
+
+    evtSource.addEventListener('open', () => {
+        if (chats[chatId] && chats[chatId]._evtSource !== evtSource) return;
+        clearStreamRecovery(chatId);
+        const chat = chats[chatId];
+        if (chat && chat.status === 'running') {
+            const activity = ensureChatActivity(chatId);
+            if ((activity.detail || '').toLowerCase().includes('reconnecting')) {
+                activity.detail = 'Stream reconnected';
+                activity.state = 'running';
+                activity.lastEventAt = Date.now();
+                if (activeChatId === chatId) renderActiveChatActivity();
+            }
+        }
+    });
 
     const handleMsg = (e) => {
+        if (chats[chatId] && chats[chatId]._evtSource !== evtSource) return;
         try {
             const data = JSON.parse(e.data);
             const watch = getStallWatchState(chatId);
@@ -387,6 +489,7 @@ function streamChat(chatId) {
             if (!chats[chatId]) chats[chatId] = { id: chatId, events: [], status: 'running' };
             chats[chatId].events.push({ type: e.type, ...data });
             recordChatActivity(chatId, e.type, data);
+            clearStreamRecovery(chatId);
 
             // If this is the active chat, render it live
             if (activeChatId === chatId) {
@@ -416,6 +519,7 @@ function streamChat(chatId) {
 
     // Handle done separately to close stream and notify
     evtSource.addEventListener('done', (e) => {
+        if (chats[chatId] && chats[chatId]._evtSource !== evtSource) return;
         let doneData = {};
         try {
             const data = JSON.parse(e.data);
@@ -430,6 +534,7 @@ function streamChat(chatId) {
         recordChatActivity(chatId, 'done', doneData);
         evtSource.close();
         if (chats[chatId]) chats[chatId]._evtSource = null;
+        clearStreamRecovery(chatId);
         if (chats[chatId]) chats[chatId].status = 'done';
         renderChatList();
         // Notify if not the active chat
@@ -443,16 +548,31 @@ function streamChat(chatId) {
         updateStopChatButton();
     });
 
-    evtSource.addEventListener('error', (e) => {
-        evtSource.close();
-        if (chats[chatId]) chats[chatId]._evtSource = null;
-        recordChatActivity(chatId, 'error', { message: 'Stream connection lost' });
-        if (chats[chatId] && chats[chatId].status === 'running') {
-            chats[chatId].status = 'done';
-            renderChatList();
+    evtSource.addEventListener('error', () => {
+        const chat = chats[chatId];
+        if (!chat) {
+            evtSource.close();
+            return;
         }
-        renderActiveChatActivity();
-        updateStopChatButton();
+        if (chat._evtSource && chat._evtSource !== evtSource) return;
+
+        if (chat.status !== 'running') {
+            evtSource.close();
+            if (chat._evtSource === evtSource) chat._evtSource = null;
+            return;
+        }
+
+        const activity = ensureChatActivity(chatId);
+        if (evtSource.readyState === EventSource.CONNECTING) {
+            activity.detail = 'Stream interrupted; reconnecting...';
+        } else {
+            activity.detail = 'Stream disconnected; retrying...';
+        }
+        activity.state = 'running';
+        activity.lastEventAt = Date.now();
+        if (activeChatId === chatId) renderActiveChatActivity();
+
+        scheduleStreamRecovery(chatId, 'error');
     });
 }
 
@@ -492,10 +612,12 @@ async function deleteChat(chatId, e) {
     if (chats[chatId]?._evtSource) {
         chats[chatId]._evtSource.close();
     }
+    clearStreamRecovery(chatId);
     delete chats[chatId];
     delete chatActivity[chatId];
     delete chatRenderState[chatId];
     delete stallWatchState[chatId];
+    delete streamRecoveryState[chatId];
     if (activeChatId === chatId) {
         activeChatId = null;
         closeAskModal();
@@ -524,6 +646,7 @@ async function stopActiveChat() {
             chats[chatId]._evtSource.close();
             chats[chatId]._evtSource = null;
         }
+        clearStreamRecovery(chatId);
 
         const latest = await apiGetChat(chatId);
         if (!latest?.error) {

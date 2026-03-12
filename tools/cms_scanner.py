@@ -154,6 +154,56 @@ WP_VULN_PATHS = [
 ]
 
 
+def _clean_wp_slug(value):
+    """Normalize plugin/theme slugs and drop obvious noise."""
+    slug = re.sub(r"[^a-z0-9._-]", "", (value or "").strip().lower())
+    if not slug:
+        return ""
+    if slug in {"*", ",", ".", "-", "_", "null", "undefined"}:
+        return ""
+    if len(slug) < 2:
+        return ""
+    return slug
+
+
+def _classify_wp_exposure(path):
+    critical_paths = {
+        "/wp-config.php.bak",
+        "/wp-config.php~",
+        "/wp-config.php.save",
+        "/wp-config.php.swp",
+        "/wp-config.php.old",
+        "/.wp-config.php.swp",
+    }
+    high_paths = {
+        "/wp-json/wp/v2/users",
+        "/?rest_route=/wp/v2/users",
+        "/xmlrpc.php",
+        "/wp-admin/setup-config.php",
+        "/wp-admin/install.php",
+        "/wp-content/debug.log",
+        "/wp-content/uploads/wc-logs/",
+    }
+    medium_paths = {
+        "/readme.html",
+        "/license.txt",
+        "/wp-json/wp/v2/media?per_page=100",
+        "/wp-json/wp/v2/posts?per_page=100",
+        "/wp-json/wp/v2/pages?per_page=100",
+        "/wp-content/uploads/",
+        "/wp-content/plugins/",
+        "/wp-content/themes/",
+    }
+
+    if path in critical_paths:
+        return "CRITICAL"
+    if path in high_paths:
+        return "HIGH"
+    if path in medium_paths:
+        return "MEDIUM"
+    return "LOW"
+
+
 def cms_scan(target, stream_callback=None):
     """Detect CMS, version, and check for known vulnerabilities."""
     def _emit(msg):
@@ -244,8 +294,9 @@ def cms_scan(target, stream_callback=None):
                 if r.status_code == 200 and len(r.text) > 50:
                     # Verify it's not just a generic 200
                     if "404" not in r.text[:200].lower() and "not found" not in r.text[:200].lower():
+                        sev = _classify_wp_exposure(path)
                         return {"path": path, "desc": desc, "status": r.status_code, "size": len(r.text),
-                                "preview": r.text[:200]}
+                                "preview": r.text[:200], "severity": sev}
             except Exception:
                 pass
             return None
@@ -264,10 +315,15 @@ def cms_scan(target, stream_callback=None):
         themes_found = set()
 
         # From HTML
-        for match in re.findall(r'/wp-content/plugins/([^/]+)/', r.text if hasattr(r, 'text') else main_html):
-            plugins_found.add(match)
-        for match in re.findall(r'/wp-content/themes/([^/]+)/', r.text if hasattr(r, 'text') else main_html):
-            themes_found.add(match)
+        html_for_slug_enum = r.text if hasattr(r, "text") else main_html
+        for match in re.findall(r'/wp-content/plugins/([^/]+)/', html_for_slug_enum):
+            cleaned = _clean_wp_slug(match)
+            if cleaned:
+                plugins_found.add(cleaned)
+        for match in re.findall(r'/wp-content/themes/([^/]+)/', html_for_slug_enum):
+            cleaned = _clean_wp_slug(match)
+            if cleaned:
+                themes_found.add(cleaned)
 
         # Common vulnerable plugins
         vuln_plugins = [
@@ -355,14 +411,23 @@ def cms_scan(target, stream_callback=None):
         lines.append("")
 
     if findings:
+        sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+        findings.sort(key=lambda item: (sev_order.get(item.get("severity", "LOW"), 4), item.get("path", "")))
         lines.append(f"🔴 EXPOSED PATHS ({len(findings)} found)")
         lines.append("-" * 40)
         for f in findings:
-            lines.append(f"  {f['path']} — {f['desc']}")
+            lines.append(f"  [{f.get('severity', 'LOW')}] {f['path']} — {f['desc']}")
             lines.append(f"    Status: {f['status']}, Size: {f['size']} bytes")
             if "user" in f['path'].lower() and f.get('preview'):
                 lines.append(f"    Preview: {f['preview'][:100]}...")
         lines.append("")
+        severe_findings = [f for f in findings if f.get("severity") in {"CRITICAL", "HIGH"}]
+        if severe_findings:
+            lines.append(f"🚨 HIGH-IMPACT VERIFIED LEADS ({len(severe_findings)})")
+            lines.append("-" * 40)
+            for f in severe_findings:
+                lines.append(f"  [{f['severity']}] {f['path']} — {f['desc']}")
+            lines.append("")
 
     if wp_detected:
         if plugins_found:
@@ -380,16 +445,21 @@ def cms_scan(target, stream_callback=None):
 
     lines.append("RECOMMENDED NEXT STEPS")
     lines.append("-" * 40)
+    next_steps = []
     if detected_cms:
         cms_name = detected_cms[0]["name"]
         ver = detected_cms[0].get("version", "")
         if ver:
-            lines.append(f"  1. Run: lookup_cve software='{cms_name}' version='{ver}'")
-        lines.append(f"  2. Run: exploit_target type='auto' on {base}")
+            next_steps.append(f"Run: lookup_cve software='{cms_name}' version='{ver}'")
+        next_steps.append(f"Run: run_nuclei target='{base}' severity='critical,high,medium'")
     if wp_detected:
-        lines.append(f"  3. Run: exploit_target type='wp_enum' and type='wp_bruteforce'")
-    lines.append(f"  4. Run: js_analyze to find secrets in JavaScript")
-    lines.append(f"  5. Run: param_mine to find hidden parameters")
+        next_steps.append(f"Run: run_wpscan target='{base}' scan_profile='aggressive_enum'")
+    next_steps.append(f"Run: check_exposed_paths base_url='{base}'")
+    next_steps.append("Run: js_analyze to find secrets in JavaScript")
+    next_steps.append("Run: param_mine to find hidden parameters")
+
+    for idx, step in enumerate(next_steps, 1):
+        lines.append(f"  {idx}. {step}")
 
     return "\n".join(lines)
 

@@ -12,6 +12,8 @@ from tools._cli_runner import (
     run_command,
     write_text,
 )
+from tools.cms_scanner import cms_scan
+from tools.vuln_check import check_exposed_paths
 
 
 def _normalize_target(target: str):
@@ -192,6 +194,32 @@ def _looks_like_non_wordpress(stdout_text: str, stderr_text: str):
     return any(marker in blob for marker in checks)
 
 
+def _wpscan_fallback_assessment(target: str, stream_callback=None):
+    sections = []
+    try:
+        sections.append(cms_scan(target, stream_callback=stream_callback))
+    except Exception as exc:
+        sections.append(f"cms_scan fallback error: {str(exc)}")
+
+    try:
+        sections.append(check_exposed_paths(target, scan_profile="standard", stream_callback=stream_callback))
+    except Exception as exc:
+        sections.append(f"check_exposed_paths fallback error: {str(exc)}")
+
+    return "\n\n".join([s for s in sections if str(s or "").strip()]) or "No fallback output generated."
+
+
+def _tail_text(text: str, max_lines: int = 8, max_chars: int = 700):
+    blob = str(text or "").strip()
+    if not blob:
+        return ""
+    lines = blob.splitlines()
+    tail = "\n".join(lines[-max_lines:])
+    if len(tail) > max_chars:
+        tail = tail[-max_chars:]
+    return tail
+
+
 def run_wpscan(
     target: str,
     scan_profile: str = "aggressive_enum",
@@ -214,7 +242,18 @@ def run_wpscan(
         install_timeout=max(240, int(timeout)),
     )
     if not binary_name:
-        return missing_error
+        emit(stream_callback, "coverage_degraded", {
+            "tool": "run_wpscan",
+            "code": "BIN_MISSING",
+            "message": "WPScan unavailable after auto-install attempt.",
+            "fallback": "cms_scan + check_exposed_paths",
+        })
+        fallback = _wpscan_fallback_assessment(normalized, stream_callback=stream_callback)
+        return (
+            "COVERAGE DOWNGRADE: WPScan unavailable; fallback WordPress assessment executed.\n"
+            f"{missing_error}\n\n"
+            f"{fallback}"
+        )
 
     token = _get_wpscan_token()
     env_patch = {}
@@ -270,6 +309,22 @@ def run_wpscan(
 
     summary = _summarize_report(report_file)
     non_wp = _looks_like_non_wordpress(result["stdout"], result["stderr"])
+
+    if int(result.get("exit_code", 0) or 0) != 0 and not summary.get("loaded", False):
+        emit(stream_callback, "coverage_degraded", {
+            "tool": "run_wpscan",
+            "code": "EXEC_FAILURE",
+            "message": "WPScan execution failed before producing structured report output.",
+            "fallback": "cms_scan + check_exposed_paths",
+        })
+        fallback = _wpscan_fallback_assessment(normalized, stream_callback=stream_callback)
+        err_tail = _tail_text(result.get("stderr", ""))
+        extra = f"\nWPScan stderr tail:\n{err_tail}" if err_tail else ""
+        return (
+            "COVERAGE DOWNGRADE: WPScan execution failed; fallback WordPress assessment executed.\n"
+            f"WPScan exit_code={result.get('exit_code')}, elapsed={result.get('elapsed')}s.{extra}\n\n"
+            f"{fallback}"
+        )
 
     if non_wp and not summary["is_wp"]:
         return (

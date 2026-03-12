@@ -10,6 +10,7 @@ from tools._cli_runner import (
     run_command,
     write_text,
 )
+from tools.port_scanner import port_scan
 
 
 def _normalize_host(target: str):
@@ -34,6 +35,10 @@ def run_naabu(
     if not host:
         return "ERROR: target is required"
 
+    profile = (scan_type or "top100").strip().lower()
+    if profile not in {"top100", "top1000", "full"}:
+        profile = "top100"
+
     binary_name, _, missing_error = find_binary_or_auto_install(
         ["naabu"],
         tool_name="Naabu",
@@ -41,11 +46,23 @@ def run_naabu(
         install_timeout=max(180, int(timeout)),
     )
     if not binary_name:
-        return missing_error
-
-    profile = (scan_type or "top100").strip().lower()
-    if profile not in {"top100", "top1000", "full"}:
-        profile = "top100"
+        emit(stream_callback, "coverage_degraded", {
+            "tool": "run_naabu",
+            "code": "BIN_MISSING",
+            "message": "Naabu unavailable after auto-install attempt.",
+            "fallback": "internal-port-scan",
+        })
+        fallback = port_scan(
+            target=host,
+            scan_type=profile,
+            timeout=min(int(timeout), 180),
+            stream_callback=stream_callback,
+        )
+        return (
+            "COVERAGE DOWNGRADE: naabu unavailable; internal port scanner fallback executed.\n"
+            f"{missing_error}\n\n"
+            f"{fallback}"
+        )
 
     artifact_dir = create_artifact_dir("naabu", artifact_session)
     ports_file = artifact_dir / "open_ports.txt"
