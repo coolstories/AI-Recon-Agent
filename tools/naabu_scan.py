@@ -4,10 +4,9 @@ import json
 from urllib.parse import urlparse
 
 from tools._cli_runner import (
-    build_missing_binary_error,
     create_artifact_dir,
     emit,
-    find_binary,
+    find_binary_or_auto_install,
     run_command,
     write_text,
 )
@@ -35,9 +34,14 @@ def run_naabu(
     if not host:
         return "ERROR: target is required"
 
-    binary_name, _ = find_binary(["naabu"])
+    binary_name, _, missing_error = find_binary_or_auto_install(
+        ["naabu"],
+        tool_name="Naabu",
+        stream_callback=stream_callback,
+        install_timeout=max(180, int(timeout)),
+    )
     if not binary_name:
-        return build_missing_binary_error(["naabu"], "Naabu")
+        return missing_error
 
     profile = (scan_type or "top100").strip().lower()
     if profile not in {"top100", "top1000", "full"}:

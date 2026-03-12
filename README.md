@@ -31,6 +31,7 @@ cp .env.example .env
 # Optional: set TRUTH_VERIFICATION_POLICY (strict|balanced|aggressive) for deep-scan verification gating
 # Optional: set ACCESS_PASSWORD (HTTP Basic Auth password for UI/API)
 # Optional: set LLM_DEBUG_ERRORS=1 to include sanitized provider/model/key diagnostics in worker errors
+# Optional: set AUTO_INSTALL_MISSING_TOOLS=1 to auto-run tool installer when binaries are missing
 
 # 4. Run
 python main.py
@@ -97,6 +98,7 @@ This includes raw output, JSON reports, logs, and visual assets when generated.
 - Optional variables:
   - `TRUTH_VERIFICATION_POLICY`
   - `LLM_DEBUG_ERRORS` (default `1`; set `0` to hide detailed LLM diagnostics)
+  - `AUTO_INSTALL_MISSING_TOOLS` (default `1`; set `0` to disable automatic tool-install attempts)
   - `SHODAN_API_KEY`, `WPSCAN_API_TOKEN`, etc.
 
 HTTP Basic Auth is enabled by default when `ACCESS_PASSWORD` is set.

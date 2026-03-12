@@ -26,10 +26,36 @@ INSTALL_HINTS = {
     "wpscan": "Install: brew install wpscanteam/tap/wpscan or gem install wpscan; Docker: docker run --rm wpscanteam/wpscan --help",
 }
 
+AUTO_INSTALL_LOCK = threading.Lock()
+AUTO_INSTALL_LAST_ATTEMPT_TS = 0.0
+AUTO_INSTALL_LAST_SUMMARY = "not_attempted"
+AUTO_INSTALL_COOLDOWN_SEC = 300
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+COMMON_BIN_DIRS = [
+    Path.home() / ".local" / "bin",
+    Path.home() / "go" / "bin",
+    Path("/opt/homebrew/bin"),
+    Path("/usr/local/bin"),
+]
+
 
 def emit(stream_callback, event_type: str, data: dict):
     if stream_callback:
         stream_callback(event_type, data)
+
+
+def _ensure_path_dir(path: str):
+    if not path:
+        return
+    current = os.environ.get("PATH", "")
+    parts = current.split(":") if current else []
+    if path not in parts:
+        os.environ["PATH"] = f"{path}:{current}" if current else path
+
+
+def _is_truthy_env(name: str, default: str = "1"):
+    raw = str(os.getenv(name, default) or default).strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 def find_binary(candidates: Iterable[str]):
@@ -37,6 +63,11 @@ def find_binary(candidates: Iterable[str]):
         path = shutil.which(name)
         if path:
             return name, path
+        for base in COMMON_BIN_DIRS:
+            candidate = base / name
+            if candidate.exists() and os.access(candidate, os.X_OK):
+                _ensure_path_dir(str(base))
+                return name, str(candidate)
     return None, None
 
 
@@ -50,6 +81,109 @@ def build_missing_binary_error(candidates: Iterable[str], tool_name: str = ""):
         f"{hint}\n"
         "You can also run: ./scripts/install_security_tools.sh"
     )
+
+
+def _tail_text(value: str, max_lines: int = 8, max_chars: int = 600):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+    tail = "\n".join(lines[-max_lines:])
+    if len(tail) > max_chars:
+        tail = tail[-max_chars:]
+    return tail
+
+
+def _run_tool_installer(timeout: int = 900, stream_callback=None):
+    script_path = PROJECT_ROOT / "scripts" / "install_security_tools.sh"
+    if not script_path.exists():
+        return {
+            "ran": False,
+            "timed_out": False,
+            "elapsed": 0.0,
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": f"Installer script not found: {script_path}",
+        }
+
+    emit(stream_callback, "tool_info", {
+        "message": "Missing scanner binary detected. Attempting auto-install via ./scripts/install_security_tools.sh",
+    })
+    result = run_command(["bash", str(script_path)], timeout=timeout, stream_callback=stream_callback, cwd=str(PROJECT_ROOT))
+    for base in COMMON_BIN_DIRS:
+        if base.exists():
+            _ensure_path_dir(str(base))
+    emit(stream_callback, "tool_info", {
+        "message": (
+            f"Auto-install finished: exit={result['exit_code']} timed_out={result['timed_out']} "
+            f"elapsed={result['elapsed']}s"
+        ),
+    })
+    return {"ran": True, **result}
+
+
+def find_binary_or_auto_install(
+    candidates: Iterable[str],
+    tool_name: str = "",
+    stream_callback=None,
+    install_timeout: int = 900,
+):
+    global AUTO_INSTALL_LAST_ATTEMPT_TS
+    global AUTO_INSTALL_LAST_SUMMARY
+
+    cands = list(candidates)
+    binary_name, binary_path = find_binary(cands)
+    if binary_name:
+        return binary_name, binary_path, ""
+
+    if not _is_truthy_env("AUTO_INSTALL_MISSING_TOOLS", "1"):
+        return None, None, build_missing_binary_error(cands, tool_name)
+
+    now = time.time()
+    install_result = None
+    with AUTO_INSTALL_LOCK:
+        binary_name, binary_path = find_binary(cands)
+        if binary_name:
+            return binary_name, binary_path, ""
+
+        age_sec = now - float(AUTO_INSTALL_LAST_ATTEMPT_TS or 0.0)
+        if AUTO_INSTALL_LAST_ATTEMPT_TS and age_sec < AUTO_INSTALL_COOLDOWN_SEC:
+            emit(stream_callback, "tool_info", {
+                "message": (
+                    f"Auto-install recently attempted ({int(age_sec)}s ago). "
+                    "Skipping reinstall cooldown and re-checking binary paths."
+                ),
+            })
+        else:
+            install_result = _run_tool_installer(timeout=max(60, int(install_timeout)), stream_callback=stream_callback)
+            AUTO_INSTALL_LAST_ATTEMPT_TS = time.time()
+            if install_result.get("ran"):
+                AUTO_INSTALL_LAST_SUMMARY = (
+                    f"exit={install_result.get('exit_code')} timed_out={install_result.get('timed_out')} "
+                    f"elapsed={install_result.get('elapsed')}s"
+                )
+            else:
+                AUTO_INSTALL_LAST_SUMMARY = str(install_result.get("stderr") or "installer_not_run")
+
+    binary_name, binary_path = find_binary(cands)
+    if binary_name:
+        return binary_name, binary_path, ""
+
+    base = build_missing_binary_error(cands, tool_name)
+    if install_result:
+        tail_out = _tail_text(install_result.get("stdout", ""))
+        tail_err = _tail_text(install_result.get("stderr", ""))
+        extra = [
+            "AUTO_INSTALL: attempted ./scripts/install_security_tools.sh "
+            f"(exit={install_result.get('exit_code')}, timed_out={install_result.get('timed_out')}, elapsed={install_result.get('elapsed')}s).",
+        ]
+        if tail_out:
+            extra.append(f"AUTO_INSTALL_STDOUT_TAIL:\n{tail_out}")
+        if tail_err:
+            extra.append(f"AUTO_INSTALL_STDERR_TAIL:\n{tail_err}")
+        return None, None, base + "\n" + "\n".join(extra)
+
+    return None, None, base + f"\nAUTO_INSTALL_LAST: {AUTO_INSTALL_LAST_SUMMARY}"
 
 
 def sanitize_session_id(value: str | None):
